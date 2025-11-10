@@ -4,7 +4,6 @@ class ExcelColumnMap(Enum):
     emp_id = "Emp ID"
     emp_name = "Emp Name"
     grade = "Grade"
-    current_status = "Current Status(e)"
     department = "Department"
     client = "Client"
     project = "Project"

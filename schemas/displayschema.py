@@ -10,9 +10,9 @@ class ShiftAllowancesResponse(BaseModel):
     emp_id : str
     emp_name : str
     grade : str
-    current_status : str
     department : str
     client : str
+    project : str
     class Config:
         from_attributes = True
 
@@ -23,7 +23,6 @@ class EmployeeResponse(BaseModel):
     emp_id: Optional[str]
     emp_name: Optional[str]
     grade: Optional[str]
-    current_status: Optional[str]
     department: Optional[str]
     client: Optional[str]
     project: Optional[str]

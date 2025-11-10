@@ -44,7 +44,6 @@ class ShiftAllowances(Base):
     emp_id = Column(String(50))
     emp_name = Column(String(150))
     grade = Column(String(20))
-    current_status = Column(String(50))
     department = Column(String(100))
     client = Column(String(100))
     project = Column(String(150))
