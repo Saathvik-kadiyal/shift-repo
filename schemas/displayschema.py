@@ -55,3 +55,27 @@ class PaginatedShiftResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class PartialUpdateShiftRequest(BaseModel):
+    shift_a_days: Optional[int] = None
+    shift_b_days: Optional[int] = None
+    shift_c_days: Optional[int] = None
+    prime_days: Optional[int] = None
+ 
+    class Config:
+        from_attributes = True
+       
+ 
+ 
+class PartialUpdateShiftResponse(BaseModel):
+    message: str
+    updated_fields: List[str]
+    shift_a_days: Optional[int]
+    shift_b_days: Optional[int]
+    shift_c_days: Optional[int]
+    prime_days: Optional[int]
+    total_days: Optional[int]
+    total_days_allowance: Optional[float]
+ 
+    class Config:
+        from_attributes = True

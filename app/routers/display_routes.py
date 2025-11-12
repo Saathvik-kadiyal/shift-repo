@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query,Body
 from sqlalchemy.orm import Session
 from db import get_db
 from models.models import ShiftAllowances
 from utils.dependencies import get_current_user
-from schemas.displayschema import PaginatedShiftResponse,EmployeeResponse
-
+from schemas.displayschema import PaginatedShiftResponse,EmployeeResponse,PartialUpdateShiftRequest,PartialUpdateShiftResponse
+from services.display_service import partial_update_shift
 
 router = APIRouter(prefix="/display")
 
@@ -31,3 +31,30 @@ def get_detail_page(id:int,
     if not data:
         raise HTTPException(status_code=404,detail="Given id doesn't exist")
     return data
+
+@router.patch(
+    "/shift/partial-update/{id}",
+    response_model=PartialUpdateShiftResponse
+)
+def partial_update_shift_route(
+    id: int,
+    updates: PartialUpdateShiftRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    update_data = updates.dict(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No updates provided")
+ 
+    updated_record = partial_update_shift(db=db, record_id=id, updates=update_data)
+ 
+    return {
+        "message": f"Record ID {id} updated successfully",
+        "updated_fields": list(update_data.keys()),
+        "shift_a_days": updated_record.shift_a_days,
+        "shift_b_days": updated_record.shift_b_days,
+        "shift_c_days": updated_record.shift_c_days,
+        "prime_days": updated_record.prime_days,
+        "total_days": updated_record.total_days,
+        "total_days_allowance": getattr(updated_record, "total_days_allowance", 0),
+    }
