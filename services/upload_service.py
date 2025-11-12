@@ -2,6 +2,7 @@ import os
 import uuid
 import io
 import pandas as pd
+import re
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -35,8 +36,12 @@ def validate_excel_data(df: pd.DataFrame, numeric_columns: list):
     errors = []
     error_rows = []
 
+    month_pattern = re.compile(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'[0-9]{2}$")
+
     for idx, row in df.iterrows():
         row_errors = []
+
+        # Numeric columns validation
         for col in numeric_columns:
             value = row[col]
             if not pd.api.types.is_numeric_dtype(type(value)):
@@ -44,6 +49,16 @@ def validate_excel_data(df: pd.DataFrame, numeric_columns: list):
                     df.at[idx, col] = pd.to_numeric(value)
                 except (ValueError, TypeError):
                     row_errors.append(f"Invalid value in '{col}' → '{value}' (expected numeric)")
+
+        # Month columns validation
+        for month_col in ["duration_month", "payroll_month"]:
+            value = str(row.get(month_col, "")).strip()
+            if value and not month_pattern.match(value):
+                row_errors.append(
+                    f"Invalid month format in '{month_col}' → '{value}' (expected format like Feb'25)"
+                )
+
+        # Collect invalid rows
         if row_errors:
             row_data = row.to_dict()
             row_data["error"] = "; ".join(row_errors)
@@ -53,6 +68,7 @@ def validate_excel_data(df: pd.DataFrame, numeric_columns: list):
     clean_df = df.drop(index=errors).reset_index(drop=True)
     error_df = pd.DataFrame(error_rows) if error_rows else None
     return clean_df, error_df
+
 
 
 async def process_excel_upload(file, db: Session, user, base_url: str):
