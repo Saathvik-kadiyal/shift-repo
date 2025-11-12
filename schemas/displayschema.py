@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime,date
 
 
 class ShiftAllowancesResponse(BaseModel):
@@ -30,9 +30,9 @@ class EmployeeResponse(BaseModel):
     account_manager: Optional[str]
     practice_lead: Optional[str]
     delivery_manager: Optional[str]
-    month_year: Optional[str]
-    duration_month: Optional[str]
-    payroll_month: Optional[str]
+    month_year: Optional[date]
+    duration_month: Optional[date]
+    payroll_month: Optional[date]
     shift_a_days: Optional[int] = 0
     shift_b_days: Optional[int] = 0
     shift_c_days: Optional[int] = 0

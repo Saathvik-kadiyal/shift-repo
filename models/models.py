@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, TIMESTAMP, Numeric, func, ForeignKey,UniqueConstraint
+    Column, Integer, String, Text, TIMESTAMP, Numeric, func, ForeignKey,UniqueConstraint,Date
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -30,8 +30,8 @@ class UploadedFiles(Base):
     uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
     uploaded_at = Column(TIMESTAMP, server_default=func.now())
     record_count = Column(Integer, default=0)
-    status = Column(String(20), default="processed")  # processing, processed, failed
-    payroll_month = Column(String(7), nullable=False) 
+    status = Column(String(20), default="processed")
+    payroll_month = Column(Date, nullable=True) 
 
     uploader = relationship("Users", back_populates="uploaded_files")
 
@@ -53,9 +53,9 @@ class ShiftAllowances(Base):
     practice_lead = Column(String(100))
     delivery_manager = Column(String(100))
 
-    month_year = Column(String(7),nullable=False,default=lambda: datetime.now().strftime("%m-%Y"))
-    duration_month = Column(String(7))               
-    payroll_month = Column(String(7))                
+    month_year = Column(Date, nullable=False, default=lambda: datetime.now().date())
+    duration_month = Column(Date, nullable=True)
+    payroll_month = Column(Date, nullable=True)                
 
     shift_a_days = Column(Integer, default=0)
     shift_b_days = Column(Integer, default=0)
