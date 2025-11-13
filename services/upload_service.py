@@ -165,9 +165,14 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
         uploaded_file.status = "failed"
         db.commit()
         raise
-
-    except Exception as e:
+    except Exception as error:
         db.rollback()
         uploaded_file.status = "failed"
         db.commit()
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+        if "duplicate key value violates unique constraint" in str(error):
+            raise HTTPException(
+                status_code=400,
+                detail="Duplicate data found: This record already exists for the same employee and payroll month."
+            )
+    
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(error)}")

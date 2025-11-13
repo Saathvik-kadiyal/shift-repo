@@ -42,7 +42,7 @@ def partial_update_shift_route(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    update_data = updates.dict(exclude_unset=True)
+    update_data = updates.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No updates provided")
  
