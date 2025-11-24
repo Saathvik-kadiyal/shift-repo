@@ -17,6 +17,14 @@ class ShiftAllowancesResponse(BaseModel):
         from_attributes = True
 
 
+class ShiftMappingResponse(BaseModel):
+    shift_type: str
+    days: int
+
+    class Config:
+        from_attributes = True
+
+
 class EmployeeResponse(BaseModel):
     id: int
     emp_id: Optional[str]
@@ -29,23 +37,22 @@ class EmployeeResponse(BaseModel):
     account_manager: Optional[str]
     practice_lead: Optional[str]
     delivery_manager: Optional[str]
-    month_year: Optional[date]
+
     duration_month: Optional[date]
     payroll_month: Optional[date]
-    shift_a_days: Optional[int] = 0
-    shift_b_days: Optional[int] = 0
-    shift_c_days: Optional[int] = 0
-    prime_days: Optional[int] = 0
-    total_days: Optional[int] = 0
+
     billability_status: Optional[str]
     practice_remarks: Optional[str]
     rmg_comments: Optional[str]
-    amar_approval: Optional[str]
+
     created_at: datetime
     updated_at: datetime
 
+    shift_mappings: List[ShiftMappingResponse] = []
+
     class Config:
         from_attributes = True
+
 
 
 class PaginatedShiftResponse(BaseModel):

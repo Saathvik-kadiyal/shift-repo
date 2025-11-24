@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query,Body
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session,joinedload
 from db import get_db
 from models.models import ShiftAllowances,ShiftMapping
 from utils.dependencies import get_current_user
@@ -52,7 +52,9 @@ def get_all_data(
 def get_detail_page(id:int, 
                     db:Session = Depends(get_db),
                     current_user=Depends(get_current_user),):
-    data = db.query(ShiftAllowances).filter(ShiftAllowances.id==id).first()
+    data = (db.query(ShiftAllowances)
+            .options(joinedload(ShiftAllowances.shift_mappings))
+            .filter(ShiftAllowances.id == id).first())
     if not data:
         raise HTTPException(status_code=404,detail="Given id doesn't exist")
     return data
