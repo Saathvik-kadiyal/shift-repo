@@ -1,5 +1,5 @@
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session,joinedload
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
 
 def update_shift_service(db: Session, record_id: int, updates: dict):
@@ -71,3 +71,51 @@ def update_shift_service(db: Session, record_id: int, updates: dict):
         "total_allowance": total_allowance,
         "shift_details": shift_details
     }
+
+def display_emp_details(emp_id: str, db: Session):
+    data = (
+        db.query(ShiftAllowances)
+        .options(joinedload(ShiftAllowances.shift_mappings))
+        .filter(ShiftAllowances.emp_id == emp_id)
+        .order_by(ShiftAllowances.payroll_month.asc())
+        .all()
+    )
+
+    if not data:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    base = data[0]
+
+    result = {
+        "emp_id": base.emp_id,
+        "emp_name": base.emp_name,
+        "available_payroll_months": [],
+        "months": []
+    }
+
+    for row in data:
+        payroll_month_str = row.payroll_month.strftime("%Y-%m")
+        result["available_payroll_months"].append(payroll_month_str)
+
+        month_obj = {
+            "id": row.id,
+            "payroll_month": payroll_month_str,
+            "client": row.client,
+            "department": row.department,
+            "project": row.project,
+            "project_code": row.project_code,
+            "account_manager": row.account_manager,
+            "A": 0,
+            "B": 0,
+            "C": 0,
+            "PRIME": 0
+        }
+
+        for m in row.shift_mappings:
+            stype = m.shift_type.strip().upper()
+            if stype in month_obj:
+                month_obj[stype] += float(m.days)
+
+        result["months"].append(month_obj)
+
+    return result

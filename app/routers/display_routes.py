@@ -4,7 +4,7 @@ from db import get_db
 from models.models import ShiftAllowances,ShiftMapping
 from utils.dependencies import get_current_user
 from schemas.displayschema import PaginatedShiftResponse,EmployeeResponse,ShiftUpdateRequest,ShiftUpdateResponse
-from services.display_service import update_shift_service
+from services.display_service import update_shift_service,display_emp_details
 from sqlalchemy import func
 
 router = APIRouter(prefix="/display")
@@ -48,16 +48,13 @@ def get_all_data(
         "data": data
     }
 
-@router.get("/{id}",response_model=EmployeeResponse)
-def get_detail_page(id:int, 
-                    db:Session = Depends(get_db),
-                    current_user=Depends(get_current_user),):
-    data = (db.query(ShiftAllowances)
-            .options(joinedload(ShiftAllowances.shift_mappings))
-            .filter(ShiftAllowances.id == id).first())
-    if not data:
-        raise HTTPException(status_code=404,detail="Given id doesn't exist")
-    return data
+@router.get("/{emp_id}")
+def get_employee_shift_details(
+    emp_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    return display_emp_details(emp_id, db)
 
 
 @router.put("/update/{record_id}", response_model=ShiftUpdateResponse)
