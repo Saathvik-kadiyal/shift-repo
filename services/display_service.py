@@ -2,77 +2,83 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session,joinedload
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
 
+def parse_shift_value(value: str):
+    if value is None or str(value).strip() == "":
+        return 0
+    try:
+        num = float(str(value).strip())
+    except:
+        raise HTTPException(status_code=400, detail=f"Invalid shift value '{value}'. Only numbers allowed.")
+    if num < 0:
+        raise HTTPException(status_code=400, detail=f"Negative values not allowed: '{value}'.")
+    return num
+
+
 def update_shift_service(db: Session, record_id: int, updates: dict):
-    # Allowed request keys
     allowed_fields = ["shift_a", "shift_b", "shift_c", "prime"]
-    
-    # Throw exception if extra fields sent
     extra_fields = [k for k in updates if k not in allowed_fields]
     if extra_fields:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid fields: {extra_fields}. Only {allowed_fields} are allowed."
+            detail=f"Invalid fields: {extra_fields}. Only {allowed_fields} allowed."
         )
-    
-    # Map request keys to DB shift types
+
+    # Convert raw strings to numeric values
+    numeric_updates = {k: parse_shift_value(v) for k, v in updates.items()}
+
+    # Rename to DB shift types + ignore zero updates
     shift_map = {"shift_a": "A", "shift_b": "B", "shift_c": "C", "prime": "PRIME"}
-    mapped_updates = {shift_map[k]: updates[k] for k in updates if updates[k] > 0}
+    mapped_updates = {shift_map[k]: numeric_updates[k] for k in numeric_updates if numeric_updates[k] > 0}
 
     if not mapped_updates:
-        raise HTTPException(status_code=400, detail="No shift days provided for update.")
+        raise HTTPException(status_code=400, detail="No valid shift values provided.")
 
-    # Fetch the main record
+    # Get record
     record = db.query(ShiftAllowances).filter(ShiftAllowances.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Shift allowance record not found")
 
-    # Fetch rates from DB
+    # Get rates from DB
     rate_rows = db.query(ShiftsAmount).all()
-    rates = {r.shift_type: float(r.amount) for r in rate_rows}
-    
-    # Throw exception if any rate missing
-    for shift_type in mapped_updates.keys():
-        if shift_type not in rates:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing rate for shift '{shift_type}' in ShiftsAmount table."
-            )
+    rates = {r.shift_type.upper(): float(r.amount) for r in rate_rows}
 
-    # Update or create shift mappings
-    existing_mappings = {m.shift_type: m for m in record.shift_mappings}
-    for shift_type, days in mapped_updates.items():
-        if shift_type in existing_mappings:
-            existing_mappings[shift_type].days = days
+    # Ensure every required rate exists
+    for stype in mapped_updates:
+        if stype not in rates:
+            raise HTTPException(status_code=400, detail=f"Missing rate for shift '{stype}'.")
+
+    # Save updated mapping
+    existing = {m.shift_type: m for m in record.shift_mappings}
+
+    for stype, days in mapped_updates.items():
+        if stype in existing:
+            existing[stype].days = days
         else:
-            new_map = ShiftMapping(
+            db.add(ShiftMapping(
                 shiftallowance_id=record.id,
-                shift_type=shift_type,
+                shift_type=stype,
                 days=days
-            )
-            db.add(new_map)
-            existing_mappings[shift_type] = new_map
+            ))
 
     db.commit()
     db.refresh(record)
 
-    # Prepare shift details only for updated shifts
+    # Format response
     shift_details = [
-        {"shift": m.shift_type, "days": m.days}
-        for shift_type, m in existing_mappings.items()
-        if shift_type in mapped_updates
+        {"shift": m.shift_type, "days": float(m.days)}
+        for m in record.shift_mappings
+        if m.shift_type in mapped_updates
     ]
 
-    total_days = sum(m.days for shift_type, m in existing_mappings.items() if shift_type in mapped_updates)
-    total_allowance = sum(m.days * rates[m.shift_type] for shift_type, m in existing_mappings.items() if shift_type in mapped_updates)
+    total_days = float(sum(float(m.days) for m in record.shift_mappings if m.shift_type in mapped_updates))
+    total_allowance = float(sum(float(m.days) * rates[m.shift_type] for m in record.shift_mappings if m.shift_type in mapped_updates))
 
     return {
-        "record_id": record.id,
+        "updated_fields": list(mapped_updates.keys()),
         "total_days": total_days,
         "total_allowance": total_allowance,
         "shift_details": shift_details
     }
-
-
 def display_emp_details(emp_id: str, db: Session):
     data = (
         db.query(ShiftAllowances)

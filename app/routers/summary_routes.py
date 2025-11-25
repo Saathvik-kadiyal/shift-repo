@@ -14,10 +14,6 @@ def client_shift_summary(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """
-    Fetch shift summary (Shift A/B/C/Prime + Total Employees + Total Allowances)
-    for a specific payroll month (YYYY-MM).
-    """
 
     if not payroll_month:
         raise HTTPException(

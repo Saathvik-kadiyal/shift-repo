@@ -59,16 +59,21 @@ def get_employee_shift_details(
 
 
 @router.put("/update/{record_id}", response_model=ShiftUpdateResponse)
-def update_detail_data(record_id: int, req: ShiftUpdateRequest, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    updates = req.model_dump() 
-    
+def update_detail_data(
+    record_id: int,
+    req: ShiftUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    updates = req.model_dump()
     result = update_shift_service(db, record_id, updates)
-    
+
     return {
         "message": "Shift updated successfully",
-        "updated_fields": [k for k, v in updates.items() if v > 0],
+        "updated_fields": result["updated_fields"],
         "total_days": result["total_days"],
         "total_allowance": result["total_allowance"],
         "shift_details": result["shift_details"]
     }
+
 

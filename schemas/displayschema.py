@@ -76,20 +76,20 @@ class PaginatedShiftResponse(BaseModel):
         from_attributes = True
 
 class ShiftUpdateRequest(BaseModel):
-    shift_a: int = 0
-    shift_b: int = 0
-    shift_c: int = 0
-    prime: int = 0
+    shift_a: Optional[str] = None
+    shift_b: Optional[str] = None
+    shift_c: Optional[str] = None
+    prime: Optional[str] = None
 
 
 class ShiftDetail(BaseModel):
     shift: str
-    days: int
+    days: float
 
 
 class ShiftUpdateResponse(BaseModel):
     message: str
     updated_fields: List[str]
-    total_days: int
+    total_days: float
     total_allowance: float
     shift_details: List[ShiftDetail]
