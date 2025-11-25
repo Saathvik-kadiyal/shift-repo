@@ -61,8 +61,8 @@ def get_detail_page(id:int,
 
 
 @router.put("/update/{record_id}", response_model=ShiftUpdateResponse)
-def update_detail_data(record_id: int, req: ShiftUpdateRequest, db: Session = Depends(get_db)):
-    updates = req.dict()  # Convert Pydantic model to dict
+def update_detail_data(record_id: int, req: ShiftUpdateRequest, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    updates = req.model_dump() 
     
     result = update_shift_service(db, record_id, updates)
     
