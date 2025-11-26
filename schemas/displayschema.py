@@ -80,13 +80,11 @@ class ShiftUpdateRequest(BaseModel):
     shift_b: Optional[str] = None
     shift_c: Optional[str] = None
     prime: Optional[str] = None
-
-
+ 
 class ShiftDetail(BaseModel):
     shift: str
     days: float
-
-
+ 
 class ShiftUpdateResponse(BaseModel):
     message: str
     updated_fields: List[str]
