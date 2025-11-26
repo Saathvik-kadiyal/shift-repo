@@ -4,7 +4,7 @@ from db import get_db
 from models.models import ShiftAllowances,ShiftMapping
 from utils.dependencies import get_current_user
 from schemas.displayschema import PaginatedShiftResponse,EmployeeResponse,ShiftUpdateRequest,ShiftUpdateResponse
-from services.display_service import update_shift_service,display_emp_details
+from services.display_service import update_shift_service,fetch_shift_record
 from sqlalchemy import func
 
 router = APIRouter(prefix="/display")
@@ -49,13 +49,16 @@ def get_all_data(
         "data": data
     }
 
-@router.get("/{emp_id}")
+@router.get("/details")
 def get_employee_shift_details(
     emp_id: str,
+    duration_month: str,
+    payroll_month: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
-    return display_emp_details(emp_id, db)
+    return fetch_shift_record(emp_id, duration_month, payroll_month, db)
+
 
 
 @router.put("/shift/update", response_model=ShiftUpdateResponse)

@@ -118,61 +118,60 @@ def update_shift_service(db: Session, emp_id: str, payroll_month: str, updates: 
         "shift_details": shift_details
     }
 
-def display_emp_details(emp_id: str, db: Session):
-    data = (
+def fetch_shift_record(emp_id: str, duration_month: str, payroll_month: str, db: Session):
+
+    # convert input month strings to DATE format (YYYY-MM)
+    try:
+        duration_dt = datetime.strptime(duration_month + "-01", "%Y-%m-%d").date()
+        payroll_dt = datetime.strptime(payroll_month + "-01", "%Y-%m-%d").date()
+    except:
+        raise HTTPException(status_code=400, detail="Invalid month format. Expected YYYY-MM")
+
+    record = (
         db.query(ShiftAllowances)
         .options(joinedload(ShiftAllowances.shift_mappings))
-        .filter(ShiftAllowances.emp_id == emp_id)
-        .order_by(ShiftAllowances.payroll_month.asc())
-        .all()
+        .filter(
+            ShiftAllowances.emp_id == emp_id,
+            ShiftAllowances.duration_month == duration_dt,
+            ShiftAllowances.payroll_month == payroll_dt,
+        )
+        .first()
     )
 
-    if not data:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    if not record:
+        raise HTTPException(status_code=404, detail="Record not found")
 
-    base = data[0]
-
+    # Base response body
     result = {
-        "emp_id": base.emp_id,
-        "emp_name": base.emp_name,
-        "available_payroll_months": [],
-        "months": []
+        "id": record.id,
+        "emp_id": record.emp_id,
+        "emp_name": record.emp_name,
+        "grade": record.grade,
+        "department": record.department,
+        "client": record.client,
+        "project": record.project,
+        "project_code": record.project_code,
+        "account_manager": record.account_manager,
+        "practice_lead": record.practice_lead,
+        "delivery_manager": record.delivery_manager,
+        "duration_month": record.duration_month.strftime("%Y-%m"),
+        "payroll_month": record.payroll_month.strftime("%Y-%m"),
+        "billability_status": record.billability_status,
+        "practice_remarks": record.practice_remarks,
+        "rmg_comments": record.rmg_comments,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        # initialize shifts with default 0
+        "A": 0,
+        "B": 0,
+        "C": 0,
+        "PRIME": 0
     }
 
-    for row in data:
-        payroll_month_str = row.payroll_month.strftime("%Y-%m")
-        result["available_payroll_months"].append(payroll_month_str)
-
-        month_obj = {
-            "id": row.id,
-            "payroll_month": payroll_month_str,
-            "grade": row.grade,
-            "department": row.department,
-            "client": row.client,
-            "project": row.project,
-            "project_code": row.project_code,
-            "account_manager": row.account_manager,
-            "practice_lead": row.practice_lead,
-            "delivery_manager": row.delivery_manager,
-            "duration_month": row.duration_month,
-            "billability_status": row.billability_status,
-            "practice_remarks": row.practice_remarks,
-            "rmg_comments": row.rmg_comments,
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-
-            # shift days
-            "A": 0,
-            "B": 0,
-            "C": 0,
-            "PRIME": 0
-        }
-
-        for m in row.shift_mappings:
-            stype = m.shift_type.strip().upper()
-            if stype in month_obj:
-                month_obj[stype] += float(m.days)
-
-        result["months"].append(month_obj)
+    # update shifts with values from mappings
+    for m in record.shift_mappings:
+        stype = m.shift_type.strip().upper()
+        if stype in ("A", "B", "C", "PRIME"):
+            result[stype] = float(m.days)
 
     return result
