@@ -64,7 +64,7 @@ def get_graph_service(db: Session, client_name: str):
     monthly_allowances = {}
 
     # Fetch shift rate table once
-    rate_rows = db.query(ShiftsAmount).all()
+    rate_rows = db.query(ShiftsAmount).filter(ShiftsAmount.payroll_year == str(current_year)).all()
     rates = {r.shift_type.strip().upper(): Decimal(str(r.amount)) for r in rate_rows}
 
     for month in range(1, 13):
@@ -123,7 +123,7 @@ def get_piechart_shift_summary(db: Session, duration_month: str):
     if not records:
         raise HTTPException(status_code=404, detail=f"No shift data found for duration_month '{duration_month}'")
 
-    rate_rows = db.query(ShiftsAmount).all()
+    rate_rows = db.query(ShiftsAmount).filter(ShiftsAmount.payroll_year == str(year)).all()
     rates = {r.shift_type.upper(): float(r.amount) for r in rate_rows}
 
     summary = {}
@@ -194,7 +194,7 @@ def get_client_total_allowance_service(db: Session, duration_month: str):
     if not records:
         raise HTTPException(status_code=404, detail=f"No records found for duration_month '{duration_month}'")
 
-    rate_rows = db.query(ShiftsAmount).all()
+    rate_rows = db.query(ShiftsAmount).filter(ShiftsAmount.payroll_year == str(month_date.year)).all()
     rates = {r.shift_type.upper(): float(r.amount) for r in rate_rows}
 
     client_totals = {}
