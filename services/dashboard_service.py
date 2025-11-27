@@ -63,8 +63,10 @@ def get_graph_service(db: Session, client_name: str):
             extract("month", ShiftAllowances.payroll_month) == month
         ).all()
 
+        month_key = datetime(1900, month, 1).strftime("%b")
+
         if not records:
-            monthly_allowances[f"{month:02d}"] = 0.0
+            monthly_allowances[month_key] = 0.0
             continue
 
         total_amount = Decimal(0)
@@ -86,9 +88,10 @@ def get_graph_service(db: Session, client_name: str):
                 if stype in amount_map:
                     total_amount += days * amount_map[stype]
 
-        monthly_allowances[f"{month:02d}"] = float(total_amount)
+        monthly_allowances[month_key] = float(total_amount)
 
     return {"graph": monthly_allowances}
+
 
 def get_all_clients_service(db: Session):
     clients = (
