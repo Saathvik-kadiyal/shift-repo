@@ -275,7 +275,11 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
             df.to_excel(path, index=False)
             raise HTTPException(
                 status_code=400,
-                detail=f"Duplicate data exists in DB. Download: {base_url}/upload/error-files/{fname}",
+                detail={
+                    "message": "Duplicate data exists in DB",
+                    "error_file": f"{base_url}/upload/error-files/{fname}",
+                },
             )
+
 
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(error)}")
