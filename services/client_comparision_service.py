@@ -286,61 +286,52 @@ def client_comparison_service(
 
     return final_result
 
-def validate_month(value: str) -> bool:
-    """Check if a string is in YYYY-MM format."""
-    try:
-        datetime.strptime(value, "%Y-%m")
-        return True
-    except ValueError:
-        return False
-
-
-def generate_months(start_month: str, end_month: str):
-    
-    start = datetime.strptime(start_month, "%Y-%m")
-    end = datetime.strptime(end_month, "%Y-%m")
-
-    months = []
-    current = start
-
-    while current <= end:
-        months.append(current.strftime("%Y-%m"))
-        # Move to next month correctly
-        if current.month == 12:
-            current = datetime(current.year + 1, 1, 1)
-        else:
-            current = datetime(current.year, current.month + 1, 1)
-
-    return months
 
 def get_client_total_allowances(db: Session, start_month: str | None, end_month: str | None, top: str | None):
-
     
-    if top is None:
-        top_int = 5 
+
+    if top is None or str(top).strip().lower() == "all":
+        top_int = None  
     else:
-        if not top.isdigit():
-            raise HTTPException(status_code=400, detail="top must be a positive integer")
+        if not str(top).isdigit():
+            raise HTTPException(status_code=400, detail="top must be a positive integer or 'all'")
         top_int = int(top)
         if top_int <= 0:
             raise HTTPException(status_code=400, detail="top must be greater than 0")
 
-    
-    if not start_month and not end_month:
-        
-        check_month = datetime.now().strftime("%Y-%m")
+    def validate_month(m: str):
+        try:
+            datetime.strptime(m, "%Y-%m")
+            return True
+        except:
+            return False
 
-        
-        months = None
-        for i in range(12):
+    def generate_months(start_m: str, end_m: str):
+        result = []
+        cur = datetime.strptime(start_m, "%Y-%m")
+        end = datetime.strptime(end_m, "%Y-%m")
+        while cur <= end:
+            result.append(cur.strftime("%Y-%m"))
+            cur += relativedelta(months=1)
+        return result
+
+    if end_month and not start_month:
+        raise HTTPException(
+            status_code=400,
+            detail="start_month is required when end_month is provided"
+        )
+
+    if not start_month and not end_month:
+        check_month = datetime.now().strftime("%Y-%m")
+        months = []
+        for _ in range(12):
             exists = (
                 db.query(ShiftAllowances)
                 .filter(func.to_char(ShiftAllowances.duration_month, 'YYYY-MM') == check_month)
                 .first()
             )
             if exists:
-                months = [check_month]
-                break
+                months.append(check_month)
 
             check_month = (
                 datetime.strptime(check_month, "%Y-%m") - relativedelta(months=1)
@@ -350,10 +341,8 @@ def get_client_total_allowances(db: Session, start_month: str | None, end_month:
             return [{"message": "No data found for last 12 months"}]
 
     elif start_month and not end_month:
-
         if not validate_month(start_month):
             raise HTTPException(status_code=400, detail="start_month must be in YYYY-MM format")
-
         months = [start_month]
 
     else:
@@ -368,56 +357,45 @@ def get_client_total_allowances(db: Session, start_month: str | None, end_month:
 
         months = generate_months(start_month, end_month)
 
-    
     rate_rows = db.query(ShiftsAmount).all()
     rates = {r.shift_type.upper(): Decimal(r.amount) for r in rate_rows}
 
-    final = []
+    summary = {}
 
-   
     for month in months:
         rows = (
             db.query(ShiftAllowances)
             .filter(func.to_char(ShiftAllowances.duration_month, 'YYYY-MM') == month)
             .all()
         )
-
-        if not rows:
-            final.append({
-                "month": month,
-                "message": f"No data found for month {month}"
-            })
-            continue
-
-        summary = {}
-
         for row in rows:
             client = row.client or "Unknown"
-
             if client not in summary:
                 summary[client] = Decimal(0)
 
             for mapping in row.shift_mappings:
                 stype = mapping.shift_type.upper()
                 days = Decimal(mapping.days or 0)
-                rate = rates.get(stype, Decimal(0))
-                summary[client] += days * rate
+                summary[client] += days * rates.get(stype, Decimal(0))
 
-        
-        result = sorted(
-            [{"client": c, "total_allowances": float(v)} for c, v in summary.items()],
-            key=lambda x: x["total_allowances"],
-            reverse=True
-        )[:top_int]  
+    if not summary:
+        raise HTTPException(
+            status_code=404,
+            detail="No shift allowance data found for the selected month(s)"
+        )
+    result = sorted(
+        [{"client": c, "total_allowances": float(v)} for c, v in summary.items()],
+        key=lambda x: x["total_allowances"],
+        reverse=True
+    )
 
-        final.append({
-            "month": month,
-            "clients": result
-        })
+    if top_int is not None:
+        result = result[:top_int]
 
-    return final
+    return result
 
- 
+
+
  
 def get_client_departments_service(db: Session, client: str | None):
  
