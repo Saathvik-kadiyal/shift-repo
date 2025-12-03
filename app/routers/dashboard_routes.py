@@ -16,7 +16,7 @@ router = APIRouter(prefix="/dashboard")
 
 @router.get("/horizontal-bar")
 def horizontal_bar(
-    start_month: str = Query(...),
+    start_month: str | None = Query(None),
     end_month: str | None = Query(None),
     top: int | None = Query(None),
     db: Session = Depends(get_db),

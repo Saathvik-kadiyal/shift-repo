@@ -28,7 +28,8 @@ def client_total_allowances(
     start_month: str | None = None,
     end_month: str | None = None,
     top: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     return get_client_total_allowances(db, start_month, end_month, top)
 

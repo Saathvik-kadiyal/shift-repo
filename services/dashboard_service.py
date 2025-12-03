@@ -16,12 +16,15 @@ def validate_month_format(month: str):
         raise HTTPException(status_code=400, detail="Invalid month format. Expected YYYY-MM")
 
 
-def get_horizontal_bar_service(db: Session, start_month: str, end_month: str | None, top: int | None):
+def get_horizontal_bar_service(db: Session, start_month: str | None, end_month: str | None, top: int | None):
+    if start_month is None:
+        latest = db.query(func.max(ShiftAllowances.duration_month)).scalar()
+        if latest is None:
+            raise HTTPException(status_code=404, detail="No records found")
+        start_date = latest
+    else:
+        start_date = validate_month_format(start_month)
 
-    # Validate start month
-    start_date = validate_month_format(start_month)
-
-    # Determine query range
     if end_month:
         end_date = validate_month_format(end_month)
         if start_date > end_date:
@@ -33,7 +36,6 @@ def get_horizontal_bar_service(db: Session, start_month: str, end_month: str | N
             .all()
         )
     else:
-        # Only one month
         records = (
             db.query(ShiftAllowances)
             .filter(ShiftAllowances.duration_month == start_date)
@@ -44,7 +46,6 @@ def get_horizontal_bar_service(db: Session, start_month: str, end_month: str | N
         raise HTTPException(status_code=404, detail="No records found in the given month range")
 
     output = {}
-
     for row in records:
         client = row.client or "Unknown"
         if client not in output:
@@ -55,15 +56,12 @@ def get_horizontal_bar_service(db: Session, start_month: str, end_month: str | N
                 "C": Decimal(0),
                 "PRIME": Decimal(0)
             }
-
         output[client]["total_unique_employees"].add(row.emp_id)
-
         for mapping in row.shift_mappings:
             stype = mapping.shift_type.strip().upper()
             if stype in ("A", "B", "C", "PRIME"):
                 output[client][stype] += Decimal(mapping.days or 0)
 
-    # Convert sets to counts and decimals to floats
     result = []
     for client, info in output.items():
         total = len(info["total_unique_employees"])
@@ -76,10 +74,8 @@ def get_horizontal_bar_service(db: Session, start_month: str, end_month: str | N
             "PRIME": float(info["PRIME"]),
         })
 
-    # Sort by descending total employees
     result.sort(key=lambda x: x["total_unique_employees"], reverse=True)
 
-    # Apply top filter if provided
     if top is not None:
         if top <= 0:
             raise HTTPException(status_code=400, detail="top must be a positive integer")
