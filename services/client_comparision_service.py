@@ -1,15 +1,13 @@
 from datetime import datetime, date
 from calendar import monthrange
 from typing import Optional, Dict, Any
-from schemas.dashboardschema import  VerticalGraphResponse
+from schemas.dashboardschema import VerticalGraphResponse
 from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_,extract
- 
+from sqlalchemy import func, and_
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
- 
- 
+
 def parse_yyyy_mm(value: str) -> date:
     try:
         dt = datetime.strptime(value, "%Y-%m")
@@ -19,22 +17,20 @@ def parse_yyyy_mm(value: str) -> date:
             status_code=400,
             detail=f"Invalid month format '{value}'. Expected 'YYYY-MM'."
         )
- 
- 
+
 def month_key_from_date(d: date) -> str:
     return d.strftime("%Y-%m")
- 
- 
+
 def last_day_of_month(d: date) -> date:
     _, last_day = monthrange(d.year, d.month)
     return date(d.year, d.month, last_day)
- 
- 
+
 def client_comparison_service(
     db: Session,
     client_name: str,
     start_month: Optional[str],
     end_month: Optional[str],
+    account_manager: Optional[str] = None,
 ):
     if end_month and not start_month:
         raise HTTPException(
@@ -88,6 +84,7 @@ def client_comparison_service(
             ShiftAllowances.emp_name,
             ShiftAllowances.department,
             ShiftAllowances.client,
+            ShiftAllowances.account_manager,
             ShiftAllowances.duration_month,
             ShiftAllowances.payroll_month,
             ShiftMapping.shift_type,
@@ -109,6 +106,9 @@ def client_comparison_service(
         )
     )
 
+    if account_manager:
+        q = q.filter(ShiftAllowances.account_manager == account_manager)
+
     rows = q.all()
     data: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
@@ -117,6 +117,7 @@ def client_comparison_service(
         emp_name,
         department,
         client,
+        account_manager_value,
         duration_month,
         payroll_month,
         shift_type,
@@ -135,6 +136,10 @@ def client_comparison_service(
             dept_key,
             {
                 "total_allowance": 0.0,
+                "dept_total_A": 0.0,
+                "dept_total_B": 0.0,
+                "dept_total_C": 0.0,
+                "dept_total_PRIME": 0.0,
                 "head_count_set": set(),
                 "diff": 0.0,
                 "emp": {},
@@ -153,6 +158,7 @@ def client_comparison_service(
                 "emp_name": emp_name,
                 "duration_month": month_key,
                 "payroll_month": payroll_month_key,
+                "account_manager": account_manager_value,
                 "A": 0.0,
                 "B": 0.0,
                 "C": 0.0,
@@ -166,12 +172,21 @@ def client_comparison_service(
 
         emp_bucket["total_allowance"] += shift_allowance
         dept_bucket["total_allowance"] += shift_allowance
+
+        if shift_type == "A":
+            dept_bucket["dept_total_A"] += shift_allowance
+        elif shift_type == "B":
+            dept_bucket["dept_total_B"] += shift_allowance
+        elif shift_type == "C":
+            dept_bucket["dept_total_C"] += shift_allowance
+        elif shift_type == "PRIME":
+            dept_bucket["dept_total_PRIME"] += shift_allowance
+
         dept_bucket["head_count_set"].add(emp_id)
 
     for month_key, month_bucket in data.items():
         for dept_key, dept_bucket in month_bucket.items():
-            head_count = len(dept_bucket["head_count_set"])
-            dept_bucket["head_count"] = head_count
+            dept_bucket["head_count"] = len(dept_bucket["head_count_set"])
             del dept_bucket["head_count_set"]
             dept_bucket["emp"] = list(dept_bucket["emp"].values())
 
@@ -180,7 +195,6 @@ def client_comparison_service(
     for idx in range(1, len(sorted_months)):
         prev_month_key = sorted_months[idx - 1]
         curr_month_key = sorted_months[idx]
-
         prev_month_bucket = data[prev_month_key]
         curr_month_bucket = data[curr_month_key]
 
@@ -200,12 +214,16 @@ def client_comparison_service(
             for emp in dept_bucket["emp"]:
                 emp_ids_month.add(emp["emp_id"])
 
-        month_bucket["vertical_total"] = {           # renamed from horizontal_total
+        month_bucket["vertical_total"] = {
             "total_allowance": total_allowance_month,
+            "total_A": sum(float(month_bucket[d]["dept_total_A"]) for d in month_bucket if d != "vertical_total"),
+            "total_B": sum(float(month_bucket[d]["dept_total_B"]) for d in month_bucket if d != "vertical_total"),
+            "total_C": sum(float(month_bucket[d]["dept_total_C"]) for d in month_bucket if d != "vertical_total"),
+            "total_PRIME": sum(float(month_bucket[d]["dept_total_PRIME"]) for d in month_bucket if d != "vertical_total"),
             "head_count": len(emp_ids_month),
         }
 
-    horizontal_total: Dict[str, Dict[str, Any]] = {}    # renamed from vertical_total
+    horizontal_total: Dict[str, Dict[str, Any]] = {}
 
     for month_key, month_bucket in data.items():
         for dept_key, dept_bucket in month_bucket.items():
@@ -237,8 +255,12 @@ def client_comparison_service(
         else:
             final_result[month_key] = {
                 "message": "No data found",
-                "vertical_total": {        # name stays vertical_total here too
+                "vertical_total": {
                     "total_allowance": 0.0,
+                    "total_A": 0.0,
+                    "total_B": 0.0,
+                    "total_C": 0.0,
+                    "total_PRIME": 0.0,
                     "head_count": 0
                 }
             }

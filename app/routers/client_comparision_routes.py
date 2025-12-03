@@ -12,6 +12,7 @@ def client_comparison(
     client_name: str = Query(..., alias="client"),
     start_month: str | None = Query(None),
     end_month: str | None = Query(None),
+    account_manager: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -19,7 +20,8 @@ def client_comparison(
         db=db,
         client_name=client_name,
         start_month=start_month,
-        end_month=end_month
+        end_month=end_month,
+        account_manager=account_manager,       
     )
 
 @router.get("/client-total-allowances")
