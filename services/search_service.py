@@ -31,6 +31,23 @@ def export_filtered_excel(
             except ValueError:
                 raise HTTPException(status_code=400, detail="Month format must be YYYY-MM")
 
+    if start_month and end_month and start_month > end_month:
+        raise HTTPException(status_code=400, detail="start_month must be less than or equal to end_month")
+
+    current_month = datetime.now().strftime("%Y-%m")
+
+    if start_month and start_month > current_month:
+        raise HTTPException(
+            status_code=400,
+            detail=f"start_month '{start_month}' cannot be greater than current month {current_month}"
+        )
+
+    if end_month and end_month > current_month:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_month '{end_month}' cannot be greater than current month {current_month}"
+        )
+
     base_query = (
         db.query(
             ShiftAllowances.id,
@@ -46,7 +63,6 @@ def export_filtered_excel(
         )
     )
 
-    # MONTH FILTERS
     if start_month and end_month:
         base_query = base_query.filter(
             func.to_char(ShiftAllowances.duration_month, "YYYY-MM") >= start_month,
@@ -56,16 +72,13 @@ def export_filtered_excel(
         base_query = base_query.filter(
             func.to_char(ShiftAllowances.duration_month, "YYYY-MM") == start_month
         )
-    # else → No month filter → return full DB based on other search params
 
-    # EMP / ACCOUNT MANAGER FILTERS
     if emp_id:
         base_query = base_query.filter(func.upper(ShiftAllowances.emp_id).like(f"%{emp_id.upper()}%"))
 
     if account_manager:
         base_query = base_query.filter(func.upper(ShiftAllowances.account_manager).like(f"%{account_manager.upper()}%"))
 
-    # PAGINATION
     total_records = base_query.count()
     rows = base_query.order_by(
         ShiftAllowances.duration_month.desc(),
@@ -76,13 +89,6 @@ def export_filtered_excel(
         raise HTTPException(status_code=404, detail="No data found based on filters")
 
     result = []
-    SHIFT_LABELS = {
-        "A": "A(9PM to 6AM)",
-        "B": "B(4PM to 1AM)",
-        "C": "C(6AM to 3PM)",
-        "PRIME": "PRIME(12AM to 9AM)"
-    }
-
     for row in rows:
         row_dict = row._asdict()
         shiftallowance_id = row_dict.pop("id")
