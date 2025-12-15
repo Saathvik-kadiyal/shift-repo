@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 from db import get_db
 from utils.dependencies import get_current_user
 from services.upload_service import process_excel_upload, TEMP_FOLDER
-from schemas.displayschema import CorrectedRowsRequest
 
 router = APIRouter(prefix="/upload")
 
