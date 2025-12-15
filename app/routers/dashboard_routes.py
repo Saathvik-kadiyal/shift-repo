@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from db import get_db
+from utils.dependencies import get_current_user
 
 from schemas.dashboardschema import (
     HorizontalBarResponse,
@@ -26,7 +27,8 @@ def get_horizontal_bar(
     start_month: str | None = None,
     end_month: str | None = None,
     top: int | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     return get_horizontal_bar_service(db, start_month, end_month, top)
 
@@ -35,7 +37,8 @@ def get_graph(
     client_name: str,
     start_month: str | None = None,
     end_month: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     return get_graph_service(db, client_name, start_month, end_month)
 
@@ -49,7 +52,8 @@ def get_piechart(
     start_month: str | None = None,
     end_month: str | None = None,
     top: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     return get_piechart_shift_summary(db, start_month, end_month, top)
 
@@ -59,7 +63,8 @@ def get_vertical_bar(
     start_month: str | None = None,
     end_month: str | None = None,
     top: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     return get_vertical_bar_service(db, start_month, end_month, top)
 
