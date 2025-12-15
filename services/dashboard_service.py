@@ -4,11 +4,11 @@ from datetime import datetime
 from decimal import Decimal
 from fastapi import HTTPException
 from models.models import ShiftAllowances, ShiftsAmount
-from schemas.dashboardschema import VerticalGraphResponse,VerticalBarResponse
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import func
 from typing import List
 from utils.client_enums import Company
+
 
 def validate_month_format(month: str):
     try:
@@ -16,6 +16,18 @@ def validate_month_format(month: str):
     except:
         raise HTTPException(status_code=400, detail="Invalid month format. Expected YYYY-MM")
 
+
+def _map_client_names(client_value: str):
+    """
+    Returns:
+        full_name -> Company.value
+        enum_name -> Company.name
+    """
+    for c in Company:
+        if c.value == client_value or c.name == client_value:
+            return c.value, c.name  
+
+    return client_value, client_value
 
 def get_horizontal_bar_service(db: Session, start_month: str | None, end_month: str | None, top: int | None):
     if start_month is None:
@@ -66,8 +78,12 @@ def get_horizontal_bar_service(db: Session, start_month: str | None, end_month: 
     result = []
     for client, info in output.items():
         total = len(info["total_unique_employees"])
+
+        client_full, client_enum = _map_client_names(client)
+
         result.append({
-            "client": next((c.name for c in Company if c.value == client), client),
+            "client_full_name": client_full,
+            "client_enum": client_enum,
             "total_unique_employees": total,
             "A": float(info["A"]),
             "B": float(info["B"]),
@@ -110,7 +126,6 @@ def get_graph_service(
             status_code=404,
             detail=f"Client '{client_name}' not found in database"
         )
-
 
     def validate_month(m: str):
         try:
@@ -192,7 +207,12 @@ def get_graph_service(
 
         monthly_allowances[month_name] = float(total_amount)
 
-    return {"graph": monthly_allowances}
+    client_full, client_enum = _map_client_names(client_name)
+    return {
+        "client_full_name": client_full,
+        "client_enum": client_enum,
+        "graph": monthly_allowances
+    }
 
 
 def get_all_clients_service(db: Session):
@@ -288,10 +308,13 @@ def get_piechart_shift_summary(
         )
         for row in records:
             client_real = row.client or "Unknown"
-            client = next((c.name for c in Company if c.value == client_real), client_real)
 
-            if client not in combined:
-                combined[client] = {
+            client_full, client_enum = _map_client_names(client_real)
+
+            if client_enum not in combined:
+                combined[client_enum] = {
+                    "client_full_name": client_full,
+                    "client_enum": client_enum,
                     "employees": set(),
                     "shift_a": 0,
                     "shift_b": 0,
@@ -299,19 +322,23 @@ def get_piechart_shift_summary(
                     "prime": 0,
                     "total_allowances": 0
                 }
-            combined[client]["employees"].add(row.emp_id)
+
+            combined[client_enum]["employees"].add(row.emp_id)
+
             for mapping in row.shift_mappings:
                 stype = mapping.shift_type.upper()
                 days = int(mapping.days or 0)
+
                 if stype == "A":
-                    combined[client]["shift_a"] += days
+                    combined[client_enum]["shift_a"] += days
                 elif stype == "B":
-                    combined[client]["shift_b"] += days
+                    combined[client_enum]["shift_b"] += days
                 elif stype == "C":
-                    combined[client]["shift_c"] += days
+                    combined[client_enum]["shift_c"] += days
                 elif stype == "PRIME":
-                    combined[client]["prime"] += days
-                combined[client]["total_allowances"] += days * rates.get(stype, 0)
+                    combined[client_enum]["prime"] += days
+
+                combined[client_enum]["total_allowances"] += days * rates.get(stype, 0)
 
     if not combined:
         raise HTTPException(
@@ -320,10 +347,17 @@ def get_piechart_shift_summary(
         )
 
     result = []
-    for client, info in combined.items():
-        total_days = info["shift_a"] + info["shift_b"] + info["shift_c"] + info["prime"]
+    for key, info in combined.items():
+        total_days = (
+            info["shift_a"]
+            + info["shift_b"]
+            + info["shift_c"]
+            + info["prime"]
+        )
+
         result.append({
-            "client": client,
+            "client_full_name": info["client_full_name"],
+            "client_enum": info["client_enum"],
             "total_employees": len(info["employees"]),
             "shift_a": info["shift_a"],
             "shift_b": info["shift_b"],
@@ -341,13 +375,12 @@ def get_piechart_shift_summary(
     return result
 
 
-
 def get_vertical_bar_service(
     db: Session,
     start_month: str | None = None,
     end_month: str | None = None,
     top: str | None = None
-) -> List[VerticalGraphResponse]:
+) -> List[dict]:
 
     if top is None:
         top_int = None
@@ -381,14 +414,20 @@ def get_vertical_bar_service(
     if not start_month and not end_month:
         check_month = datetime.now().strftime("%Y-%m")
         months = None
+
         for _ in range(12):
             exists = db.query(ShiftAllowances).filter(
                 func.to_char(ShiftAllowances.duration_month, 'YYYY-MM') == check_month
             ).first()
+
             if exists:
                 months = [check_month]
                 break
-            check_month = (datetime.strptime(check_month, "%Y-%m") - relativedelta(months=1)).strftime("%Y-%m")
+
+            check_month = (
+                datetime.strptime(check_month, "%Y-%m") - relativedelta(months=1)
+            ).strftime("%Y-%m")
+
         if not months:
             raise HTTPException(404, "No shift allowance data found for the last 12 months")
 
@@ -403,16 +442,20 @@ def get_vertical_bar_service(
     else:
         if not validate_month_format(start_month) or not validate_month_format(end_month):
             raise HTTPException(400, "Months must be in YYYY-MM format")
+
         if end_month < start_month:
             raise HTTPException(400, "end_month cannot be less than start_month")
+
         months = generate_months_list(start_month, end_month)
 
     rate_rows = db.query(ShiftsAmount).all()
     rates = {r.shift_type.upper(): float(r.amount) for r in rate_rows}
 
     summary = {}
+
     for m in months:
         year, month_num = map(int, m.split("-"))
+
         records = db.query(ShiftAllowances).filter(
             extract("year", ShiftAllowances.duration_month) == year,
             extract("month", ShiftAllowances.duration_month) == month_num
@@ -420,30 +463,38 @@ def get_vertical_bar_service(
 
         for row in records:
             client_real = row.client or "Unknown"
-            client = next((c.name for c in Company if c.value == client_real), client_real)
 
-            if client not in summary:
-                summary[client] = {"total_days": 0, "total_allowances": 0}
+            client_full, client_enum = _map_client_names(client_real)
+            key = client_enum
+
+            if key not in summary:
+                summary[key] = {
+                    "client_full_name": client_full,
+                    "client_enum": client_enum,
+                    "total_days": 0,
+                    "total_allowances": 0
+                }
 
             for mapping in row.shift_mappings:
                 stype = mapping.shift_type.upper()
                 days = float(mapping.days or 0)
-                summary[client]["total_days"] += days
-                summary[client]["total_allowances"] += days * rates.get(stype, 0)
+
+                summary[key]["total_days"] += days
+                summary[key]["total_allowances"] += days * rates.get(stype, 0)
 
     if not summary:
         raise HTTPException(404, "No shift allowance data found for the selected month(s)")
 
-    result = [
-        VerticalGraphResponse(
-            client_name=client, 
-            total_days=info["total_days"],
-            total_allowances=info["total_allowances"]
-        )
-        for client, info in summary.items()
-    ]
+    result = []
+    for key, info in summary.items():
+        result.append({
+            "client_full_name": info["client_full_name"],
+            "client_enum": info["client_enum"],
+            "total_days": info["total_days"],
+            "total_allowances": info["total_allowances"]
+        })
 
-    result.sort(key=lambda x: x.total_allowances, reverse=True)
+    result.sort(key=lambda x: x["total_allowances"], reverse=True)
 
     if top_int is not None:
         result = result[:top_int]

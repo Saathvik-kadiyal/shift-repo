@@ -1,8 +1,10 @@
 from pydantic import BaseModel
 from typing import List
- 
+
+
 class PieChartClientShift(BaseModel):
-    client_name: str
+    client_full_name: str
+    client_enum: str
     total_employees: int
     shift_a: int
     shift_b: int
@@ -10,15 +12,28 @@ class PieChartClientShift(BaseModel):
     prime: int
     total_days: int
     total_allowances: float
- 
-class Config:
-    from_attributes= True
- 
+
+
+
+class HorizontalBarResponse(BaseModel):
+    Name: str
+    total_no_of_days: float
+
+
+
+class GraphResponse(BaseModel):
+    Name: str
+    total_allowances: float
+
+
+
 class VerticalGraphResponse(BaseModel):
-    client_name: str
+    client_full_name: str
+    client_enum: str
     total_days: float
     total_allowances: float
 
-class VerticalBarResponse(BaseModel):
-    months_range: str
-    clients: List[VerticalGraphResponse]
+
+class ClientList(BaseModel):
+    clients: List[str]
+

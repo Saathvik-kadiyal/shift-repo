@@ -10,17 +10,14 @@ def export_filtered_excel(
     emp_id: str | None = None,
     account_manager: str | None = None,
     start_month: str | None = None,
-    end_month: str | None = None
+    end_month: str | None = None,
+    department: str | None = None,
+    client: str | None = None
 ):
 
-    SHIFT_LABELS = {
-        "A": "A",
-        "B": "B",
-        "C": "C",
-        "PRIME": "PRIME"
-    }
+    SHIFT_LABELS = {"A": "A", "B": "B", "C": "C", "PRIME": "PRIME"}
 
-    # Base query without shift aggregation
+    
     query = (
         db.query(
             ShiftAllowances.id,
@@ -42,7 +39,7 @@ def export_filtered_excel(
         )
     )
 
-    # Filters
+    
     if emp_id:
         query = query.filter(func.trim(ShiftAllowances.emp_id) == emp_id.strip())
 
@@ -50,9 +47,18 @@ def export_filtered_excel(
         query = query.filter(func.lower(func.trim(ShiftAllowances.account_manager)) ==
                              account_manager.strip().lower())
 
+    if department:
+        query = query.filter(func.lower(func.trim(ShiftAllowances.department)) ==
+                             department.strip().lower())
+
+    if client:
+        query = query.filter(func.lower(func.trim(ShiftAllowances.client)) ==
+                             client.strip().lower())
+
     today = date.today()
     current_month_start = today.replace(day=1)
 
+   
     if start_month or end_month:
         if not start_month:
             raise HTTPException(status_code=400, detail="start_month is required when end_month is provided")
@@ -82,33 +88,40 @@ def export_filtered_excel(
             query = query.filter(func.date_trunc("month", ShiftAllowances.duration_month) == start_date)
 
     else:
-        if not emp_id and not account_manager:
+        if not emp_id and not account_manager and not department and not client:
             query = query.filter(func.date_trunc("month", ShiftAllowances.duration_month) == current_month_start)
 
-    # Execute query
+    
     rows = query.all()
     if not rows:
         raise HTTPException(status_code=404, detail="No records found for given filters")
 
-    # Shift allowance amounts
+   
     shift_amounts = db.query(ShiftsAmount).all()
-    ALLOWANCE_MAP = {item.shift_type.upper(): float(item.amount) for item in shift_amounts} if shift_amounts else {}
+    ALLOWANCE_MAP = {item.shift_type.upper(): float(item.amount) for item in shift_amounts}
 
     final_data = []
+
     for row in rows:
-        # fetch shift type & days for each employee
-        mappings = db.query(ShiftMapping.shift_type, ShiftMapping.days)\
-                     .filter(ShiftMapping.shiftallowance_id == row.id).all()
+        
+        mappings = (
+            db.query(ShiftMapping.shift_type, ShiftMapping.days)
+              .filter(ShiftMapping.shiftallowance_id == row.id)
+              .all()
+        )
 
         shift_entries = []
-        total_allowances = 0
+        total_allowance = 0.0
 
         for m in mappings:
             days = float(m.days)
             if days > 0:
                 label = SHIFT_LABELS.get(m.shift_type.upper(), m.shift_type.upper())
                 shift_entries.append(f"{label}-{int(days)}")
-                total_allowances += ALLOWANCE_MAP.get(m.shift_type.upper(), 0) * days
+                total_allowance += ALLOWANCE_MAP.get(m.shift_type.upper(), 0) * days
+
+       
+        total_allowance_fmt = f"₹ {total_allowance:,.2f}"
 
         final_data.append({
             "emp_id": row.emp_id,
@@ -127,7 +140,8 @@ def export_filtered_excel(
             "rmg_comments": row.rmg_comments,
             "duration_month": row.duration_month.strftime("%Y-%m") if row.duration_month else None,
             "payroll_month": row.payroll_month.strftime("%Y-%m") if row.payroll_month else None,
-            "total_allowances": f'₹{total_allowances:.2f}'
+            "total_allowance": total_allowance_fmt
         })
 
+   
     return pd.DataFrame(final_data)

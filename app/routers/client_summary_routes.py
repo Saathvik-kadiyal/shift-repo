@@ -1,25 +1,29 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
+from utils.dependencies import get_current_user
 
 from db import get_db
 from services.client_summary_service import client_summary_service
-from utils.dependencies import get_current_user
 
-router = APIRouter()
+router = APIRouter(
+    prefix="/client-summary",
+    tags=["Client Summary"]
+)
 
-@router.get("/client-summary")
+@router.post("")
 def client_summary(
-    client: str | None = Query(None),
-    account_manager: str | None = Query(None),
-    start_month: str | None = Query(None),
-    end_month: str | None = Query(None),
+    payload: dict = Body(
+        ...,
+        example={
+            "clients": "ALL",
+            "start_month": "YYYY-MM",
+            "end_month": "YYYY-MM",
+            "selected_year": "YYYY",
+            "selected_months": ["01", "02"],
+            "selected_quarters": ["Q1"]
+        }
+    ),
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user),
+    current_user = Depends(get_current_user)
 ):
-    return client_summary_service(
-        db=db,
-        client=client,
-        account_manager=account_manager,
-        start_month=start_month,
-        end_month=end_month,
-    )
+    return client_summary_service(db=db, payload=payload)

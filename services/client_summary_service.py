@@ -1,8 +1,7 @@
-from datetime import datetime, date
-from calendar import monthrange
-from typing import Optional, Dict, Any
-from collections import defaultdict
-from utils.client_enums import Company
+from datetime import date
+from typing import List, Dict
+import re
+
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
@@ -10,177 +9,143 @@ from sqlalchemy import func, and_
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
 
 
-def parse_yyyy_mm(value: str) -> date:
-    try:
-        dt = datetime.strptime(value, "%Y-%m")
-        return date(dt.year, dt.month, 1)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid month format '{value}'. Expected YYYY-MM")
 
 
-def last_day_of_month(d: date) -> date:
-    _, last = monthrange(d.year, d.month)
-    return date(d.year, d.month, last)
+def normalize_int(value, field: str) -> int:
+    if value is None:
+        raise HTTPException(400, f"{field} is required")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    raise HTTPException(400, f"Invalid {field} (expected numeric)")
 
 
-def _build_summary(rows: list) -> Dict[str, Any]:
-    clients: Dict[str, Any] = {}
-    global_emp_set = set()
-    global_totals = {"A": 0.0, "B": 0.0, "C": 0.0, "PRIME": 0.0}
+def validate_year(year: int):
+    current_year = date.today().year
+    if year <= 0:
+        raise HTTPException(400, "selected_year must be greater than 0")
+    if year > current_year:
+        raise HTTPException(400, "selected_year cannot be in the future")
 
-    for client_name, emp_id, emp_name, dept, account_manager, shift_type, days, amount in rows:
-        dept = dept or "UNKNOWN"
-        shift_allowance = float(days) * float(amount)
 
-        global_emp_set.add(emp_id)
-        global_totals[shift_type] += shift_allowance
-        abbr = next((c.name for c in Company if c.value == client_name), None)
-        client_key = abbr if abbr else client_name
+def parse_year_month(value: str, field: str) -> date:
+    if not isinstance(value, str) or not re.match(r"^\d{4}-\d{2}$", value):
+        raise HTTPException(400, f"{field} must be in YYYY-MM format")
+    year, month = map(int, value.split("-"))
+    if not 1 <= month <= 12:
+        raise HTTPException(400, f"{field} month must be between 01 and 12")
+    return date(year, month, 1)
 
-        client_bucket = clients.setdefault(
-            client_key,
-            {
-                "client_head_set": set(),
-                "client_A": 0.0,
-                "client_B": 0.0,
-                "client_C": 0.0,
-                "client_PRIME": 0.0,
-                "departments": {},
-            },
-        )
 
-        client_bucket["client_head_set"].add(emp_id)
-        client_bucket[f"client_{shift_type}"] += shift_allowance
-
-        dept_bucket = client_bucket["departments"].setdefault(
-            dept,
-            {
-                "dept_head_set": set(),
-                "dept_A": 0.0,
-                "dept_B": 0.0,
-                "dept_C": 0.0,
-                "dept_PRIME": 0.0,
-                "dept_total": 0.0,
-                "employees": {},
-            },
-        )
-
-        dept_bucket["dept_head_set"].add(emp_id)
-        dept_bucket[f"dept_{shift_type}"] += shift_allowance
-        dept_bucket["dept_total"] += shift_allowance
-
-        emp_bucket = dept_bucket["employees"].setdefault(
-            emp_id,
-            {
-                "emp_id": emp_id,
-                "emp_name": emp_name,
-                "account_manager": account_manager,
-                "A": 0.0,
-                "B": 0.0,
-                "C": 0.0,
-                "PRIME": 0.0,
-                "total": 0.0,
-            },
-        )
-
-        emp_bucket[shift_type] += shift_allowance
-        emp_bucket["total"] += shift_allowance
-
-    for client_key, client_bucket in clients.items():
-        client_bucket["client_head_count"] = len(client_bucket["client_head_set"])
-        del client_bucket["client_head_set"]
-        client_bucket["client_total"] = (
-            client_bucket["client_A"]
-            + client_bucket["client_B"]
-            + client_bucket["client_C"]
-            + client_bucket["client_PRIME"]
-        )
-
-        for dept_key, dept_bucket in client_bucket["departments"].items():
-            dept_bucket["dept_head_count"] = len(dept_bucket["dept_head_set"])
-            del dept_bucket["dept_head_set"]
-            dept_bucket["employees"] = list(dept_bucket["employees"].values())
-
-    month_total = {
-        "total_head_count": len(global_emp_set),
-        "A": global_totals["A"],
-        "B": global_totals["B"],
-        "C": global_totals["C"],
-        "PRIME": global_totals["PRIME"],
-        "total_allowance": (
-            global_totals["A"]
-            + global_totals["B"]
-            + global_totals["C"]
-            + global_totals["PRIME"]
-        ),
+def quarter_to_months(q: str) -> List[int]:
+    mapping = {
+        "Q1": [1, 2, 3],
+        "Q2": [4, 5, 6],
+        "Q3": [7, 8, 9],
+        "Q4": [10, 11, 12],
     }
-
-    return {"clients": clients, "month_total": month_total}
-
-
-def _generate_month_keys(start_date: date, end_date: date) -> list[str]:
-    months = []
-    current = date(start_date.year, start_date.month, 1)
-    end_marker = date(end_date.year, end_date.month, 1)
-    while current <= end_marker:
-        months.append(current.strftime("%Y-%m"))
-        if current.month == 12:
-            current = date(current.year + 1, 1, 1)
-        else:
-            current = date(current.year, current.month + 1, 1)
-    return months
+    q = q.upper().strip()
+    if q not in mapping:
+        raise HTTPException(400, "Invalid quarter (expected Q1–Q4)")
+    return mapping[q]
 
 
-def client_summary_service(
-    db: Session,
-    client: Optional[str],
-    account_manager: Optional[str],
-    start_month: Optional[str],
-    end_month: Optional[str]
-):
-    if not client and not account_manager:
-        raise HTTPException(status_code=400, detail="Either client or account_manager must be provided.")
+def empty_shift_totals():
+    return {"A": 0, "B": 0, "C": 0, "PRIME": 0}
 
-    if end_month and not start_month:
-        raise HTTPException(status_code=400, detail="end_month cannot be provided without start_month.")
 
-    # UPDATED LOGIC: pick latest month containing relevant data
-    if not start_month and not end_month:
-        latest_query = db.query(func.max(ShiftAllowances.duration_month))
-        if client and client.upper() != "ALL":
-            latest_query = latest_query.filter(ShiftAllowances.client == client)
-        if account_manager:
-            latest_query = latest_query.filter(ShiftAllowances.account_manager == account_manager)
 
-        latest_date = latest_query.scalar()
+
+def client_summary_service(db: Session, payload: dict):
+
+    payload = payload or {}
+    clients_payload = payload.get("clients")
+
+    selected_quarters = payload.get("selected_quarters", [])
+    is_quarter_selection = bool(selected_quarters)
+
+    requested_quarters = set(q.upper() for q in selected_quarters)
+    quarter_month_map: Dict[int, str] = {}
+    quarter_label_map: Dict[str, str] = {}
+
+    no_date_filters_selected = (
+        not payload.get("selected_year")
+        and not payload.get("selected_months")
+        and not payload.get("selected_quarters")
+        and not payload.get("start_month")
+        and not payload.get("end_month")
+    )
+
+    
+    if no_date_filters_selected:
+
+        latest_date = db.query(func.max(ShiftAllowances.duration_month)).scalar()
         if not latest_date:
-            return {}
+            return {"message": "No records found"}
 
-        start_date = date(latest_date.year, latest_date.month, 1)
-        end_date = last_day_of_month(latest_date)
+        selected_year = latest_date.year
+        months = [latest_date.month]
+
+   
     else:
-        start_date = parse_yyyy_mm(start_month)
-        if end_month:
-            end_date_raw = parse_yyyy_mm(end_month)
-            if (end_date_raw.year, end_date_raw.month) < (start_date.year, start_date.month):
-                raise HTTPException(status_code=400, detail="end_month must be >= start_month.")
-            end_date = last_day_of_month(end_date_raw)
+
+        start_month_raw = payload.get("start_month")
+        end_month_raw = payload.get("end_month")
+
+        if start_month_raw and end_month_raw:
+            start_month = parse_year_month(start_month_raw, "start_month")
+            end_month = parse_year_month(end_month_raw, "end_month")
+            if start_month > end_month:
+                raise HTTPException(400, "start_month cannot be greater than end_month")
+
+            selected_year = start_month.year
+            months = list(range(start_month.month, end_month.month + 1))
+
         else:
-            end_date = last_day_of_month(start_date)
+            selected_year = normalize_int(payload.get("selected_year"), "selected_year")
+            validate_year(selected_year)
 
-    current_month = date.today().replace(day=1)
-    if (start_date.year, start_date.month) > (current_month.year, current_month.month):
-        raise HTTPException(status_code=400, detail="start_month cannot be greater than current month.")
-    if (end_date.year, end_date.month) > (current_month.year, current_month.month):
-        raise HTTPException(status_code=400, detail="end_month cannot be greater than current month.")
+            months = []
 
-    q = (
+            for q in selected_quarters:
+                q = q.upper()
+                q_months = quarter_to_months(q)
+                months.extend(q_months)
+
+                label = f"{selected_year}-{q_months[0]:02d} - {selected_year}-{q_months[-1]:02d}"
+                quarter_label_map[q] = label
+
+                for m in q_months:
+                    quarter_month_map[m] = label
+
+            for m in payload.get("selected_months", []):
+                mi = normalize_int(m, "selected_months")
+                if not 1 <= mi <= 12:
+                    raise HTTPException(400, "Month must be between 1 and 12")
+                months.append(mi)
+
+        months = sorted(set(months))
+        if not months:
+            raise HTTPException(400, "No valid months selected")
+
+    
+    normalized_clients = {}
+    if isinstance(clients_payload, dict):
+        for client, depts in clients_payload.items():
+            normalized_clients[client.strip().lower()] = [
+                d.strip() for d in (depts or []) if d
+            ]
+
+  
+
+    rows = (
         db.query(
             ShiftAllowances.duration_month,
             ShiftAllowances.client,
+            ShiftAllowances.department,
             ShiftAllowances.emp_id,
             ShiftAllowances.emp_name,
-            ShiftAllowances.department,
             ShiftAllowances.account_manager,
             ShiftMapping.shift_type,
             ShiftMapping.days,
@@ -191,58 +156,106 @@ def client_summary_service(
             ShiftsAmount,
             and_(
                 ShiftsAmount.shift_type == ShiftMapping.shift_type,
-                ShiftsAmount.payroll_year == func.to_char(ShiftAllowances.payroll_month, "YYYY"),
+                ShiftsAmount.payroll_year ==
+                func.to_char(ShiftAllowances.payroll_month, "YYYY"),
             ),
         )
         .filter(
-            ShiftAllowances.duration_month >= start_date,
-            ShiftAllowances.duration_month <= end_date,
+            func.extract("year", ShiftAllowances.duration_month) == selected_year,
+            func.extract("month", ShiftAllowances.duration_month).in_(months),
         )
+        .all()
     )
 
-    if client and client.upper() != "ALL":
-        q = q.filter(ShiftAllowances.client == client)
-
-    if account_manager:
-        q = q.filter(ShiftAllowances.account_manager == account_manager)
-
-    rows = q.all()
-    month_keys = _generate_month_keys(start_date, end_date)
-
     if not rows:
-        if len(month_keys) == 1:
-            return {month_keys[0]: {"message": "No data found"}}
-        response: Dict[str, Any] = {}
-        for mk in month_keys:
-            response[mk] = {"message": "No data found"}
-        response["total"] = {"clients": {}, "month_total": {}}
-        return response
+        return {"message": "No records found"}
 
-    month_rows: Dict[str, list] = defaultdict(list)
-    all_rows: list = []
+   
 
-    for dm, client_name, emp_id, emp_name, dept, am, st, days, amt in rows:
-        rec = (client_name, emp_id, emp_name, dept, am, st, days, amt)
-        key = dm.strftime("%Y-%m")
-        month_rows[key].append(rec)
-        all_rows.append(rec)
+    response = {}
+    found_quarters = set()
 
-    if len(month_keys) == 1:
-        mk = month_keys[0]
-        month_data = month_rows.get(mk, [])
-        if not month_data:
-            return {mk: {"message": "No data found"}}
-        return {mk: _build_summary(month_data)}
+    for dm, client, dept, emp_id, emp_name, acc_mgr, stype, days, amt in rows:
 
-    interval_summary = _build_summary(all_rows)
-    response: Dict[str, Any] = {}
+        month_no = dm.month
 
-    for mk in month_keys:
-        month_data = month_rows.get(mk)
-        if month_data:
-            response[mk] = _build_summary(month_data)
+        if is_quarter_selection and month_no in quarter_month_map:
+            month_key = quarter_month_map[month_no]
+
+            for q, label in quarter_label_map.items():
+                if label == month_key:
+                    found_quarters.add(q)
         else:
-            response[mk] = {"message": "No data found"}
+            month_key = dm.strftime("%Y-%m")
 
-    response["total"] = interval_summary
+        client_key = client.strip()
+        dept_key = dept.strip()
+
+        if normalized_clients:
+            if client_key.lower() not in normalized_clients:
+                continue
+            if normalized_clients[client_key.lower()] and dept_key not in normalized_clients[client_key.lower()]:
+                continue
+
+        total = float(days or 0) * float(amt or 0)
+
+        month_block = response.setdefault(month_key, {
+            "clients": {},
+            "month_total": {
+                "total_head_count": 0,
+                **empty_shift_totals(),
+                "total_allowance": 0
+            }
+        })
+
+        client_block = month_block["clients"].setdefault(client_key, {
+            **{f"client_{k}": 0 for k in ["A", "B", "C", "PRIME"]},
+            "departments": {},
+            "client_head_count": 0,
+            "client_total": 0
+        })
+
+        dept_block = client_block["departments"].setdefault(dept_key, {
+            **{f"dept_{k}": 0 for k in ["A", "B", "C", "PRIME"]},
+            "dept_total": 0,
+            "employees": [],
+            "dept_head_count": 0
+        })
+
+        emp = next((e for e in dept_block["employees"] if e["emp_id"] == emp_id), None)
+        if not emp:
+            emp = {
+                "emp_id": emp_id,
+                "emp_name": emp_name,
+                "account_manager": acc_mgr,
+                **empty_shift_totals(),
+                "total": 0
+            }
+            dept_block["employees"].append(emp)
+            dept_block["dept_head_count"] += 1
+            client_block["client_head_count"] += 1
+            month_block["month_total"]["total_head_count"] += 1
+
+        emp[stype] += total
+        emp["total"] += total
+        dept_block[f"dept_{stype}"] += total
+        dept_block["dept_total"] += total
+        client_block[f"client_{stype}"] += total
+        client_block["client_total"] += total
+        month_block["month_total"][stype] += total
+        month_block["month_total"]["total_allowance"] += total
+
+    if is_quarter_selection:
+        missing_quarters = requested_quarters - found_quarters
+
+        for q in sorted(missing_quarters):
+            quarter_label = quarter_label_map.get(q)
+            if quarter_label and quarter_label not in response:
+                response[quarter_label] = {}
+
+        if missing_quarters:
+            response["message"] = (
+                f"No data found for quarters: {', '.join(sorted(missing_quarters))}"
+            )
+
     return response

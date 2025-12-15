@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, TIMESTAMP, Numeric, func, ForeignKey,UniqueConstraint,Date,CheckConstraint
+    Column, Integer, String, Text, TIMESTAMP, Numeric, func, ForeignKey,UniqueConstraint,Date,CheckConstraint,Float
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -59,7 +59,6 @@ class ShiftAllowances(Base):
     billability_status = Column(String(50))
     practice_remarks = Column(Text)
     rmg_comments = Column(Text)
-
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
@@ -90,6 +89,8 @@ class ShiftMapping(Base):
     shift_type = Column(String(50), nullable=False)
     # Two-decimal numeric
     days = Column(Numeric(10, 2), nullable=False, default=0)
+    total_allowance = Column(Float, default=0)
+
 
     # Optional: ensure days is non-negative
     __table_args__ = (

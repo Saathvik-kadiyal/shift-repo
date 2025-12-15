@@ -35,6 +35,7 @@ class ClientSummary(BaseModel):
 class ShiftMappingResponse(BaseModel):
     shift_type: str
     days: int
+    total_allowance:Optional[str]
 
     class Config:
         from_attributes = True
@@ -59,6 +60,7 @@ class EmployeeResponse(BaseModel):
     billability_status: Optional[str]
     practice_remarks: Optional[str]
     rmg_comments: Optional[str]
+   
 
     created_at: datetime
     updated_at: datetime
