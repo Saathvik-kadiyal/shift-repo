@@ -6,8 +6,14 @@ import re
 from datetime import datetime, date
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from models.models import UploadedFiles, ShiftAllowances, ShiftMapping
+from models.models import (
+    UploadedFiles,
+    ShiftAllowances,
+    ShiftMapping,
+    ShiftsAmount,
+)
 from utils.enums import ExcelColumnMap
+
 
 TEMP_FOLDER = "media/error_excels"
 os.makedirs(TEMP_FOLDER, exist_ok=True)
@@ -18,6 +24,7 @@ MONTH_MAP = {
     "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
 }
 
+
 def make_json_safe(obj):
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
@@ -27,6 +34,7 @@ def make_json_safe(obj):
         return [make_json_safe(i) for i in obj]
     return obj
 
+
 def parse_month_format(value: str):
     if not isinstance(value, str):
         return None
@@ -35,6 +43,17 @@ def parse_month_format(value: str):
         return datetime(2000 + int(y), MONTH_MAP[m.title()], 1).date()
     except Exception:
         return None
+
+
+def load_shift_rates(db: Session) -> dict:
+    
+    rates = {}
+    rows = db.query(ShiftsAmount).all()
+    for r in rows:
+        if r.shift_type:
+            rates[r.shift_type.upper()] = float(r.amount or 0)
+    return rates
+
 
 def delete_existing_emp_month(db: Session, emp_id, duration_month, payroll_month):
     existing = (
@@ -54,6 +73,8 @@ def delete_existing_emp_month(db: Session, emp_id, duration_month, payroll_month
         db.delete(rec)
 
     db.flush()
+
+
 
 def validate_excel_data(df: pd.DataFrame):
     errors = []
@@ -110,29 +131,26 @@ def normalize_error_rows(error_rows):
     for row in error_rows:
         r = dict(row)
         err_text = r.pop("error", "")
-
         reason = {}
 
-        errors = [e.strip() for e in err_text.split(";")]
-
-        for err in errors:
+        for err in err_text.split(";"):
+            err = err.strip()
             if "Invalid numeric value" in err:
                 col = err.split("'")[1]
-                reason[col] = f"Invalid {col} value (expected: numeric)"
-
+                reason[col] = "Expected numeric value"
             elif "Invalid month format" in err:
                 if "duration_month" in err:
-                    reason["duration_month"] = "Invalid duration month format (expected: Jan'24)"
+                    reason["duration_month"] = "Expected Jan'24"
                 elif "payroll_month" in err:
-                    reason["payroll_month"] = "Invalid payroll month format (expected: Jan'24)"
-
-            elif "Total days do not match sum of shifts" in err:
-                reason["total_days"] = "Total days do not match sum of shifts"
+                    reason["payroll_month"] = "Expected Jan'24"
+            elif "Total days do not match" in err:
+                reason["total_days"] = "Shift days mismatch"
 
         r["reason"] = reason
         normalized.append(r)
 
     return normalized
+
 
 
 async def process_excel_upload(file, db: Session, user, base_url: str):
@@ -160,15 +178,9 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
         fname = None
 
         if error_df is not None and not error_df.empty:
-            error_rows = normalize_error_rows(
-                error_df.to_dict(orient="records")
-            )
-
+            error_rows = normalize_error_rows(error_df.to_dict(orient="records"))
             fname = f"mixed_validation_errors_{uuid.uuid4().hex}.xlsx"
-            path = os.path.join(TEMP_FOLDER, fname)
-
-            error_df.rename(columns={e.name: e.value for e in ExcelColumnMap}, inplace=True)
-            error_df.to_excel(path, index=False)
+            error_df.to_excel(os.path.join(TEMP_FOLDER, fname), index=False)
 
         if clean_df.empty:
             raise HTTPException(
@@ -182,9 +194,10 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
                 })
             )
 
-        for col in ["duration_month", "payroll_month"]:
-            clean_df[col] = clean_df[col].apply(parse_month_format)
+        clean_df["duration_month"] = clean_df["duration_month"].apply(parse_month_format)
+        clean_df["payroll_month"] = clean_df["payroll_month"].apply(parse_month_format)
 
+        shift_rates = load_shift_rates(db)
         inserted = 0
 
         allowed_fields = {
@@ -200,13 +213,12 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
 
             delete_existing_emp_month(
                 db,
-                emp_id=row.get("emp_id"),
-                duration_month=row.get("duration_month"),
-                payroll_month=row.get("payroll_month"),
+                row.get("emp_id"),
+                row.get("duration_month"),
+                row.get("payroll_month"),
             )
 
-            sa_payload = {k: row[k] for k in allowed_fields if k in row}
-            sa = ShiftAllowances(**sa_payload)
+            sa = ShiftAllowances(**{k: row[k] for k in allowed_fields if k in row})
             db.add(sa)
             db.flush()
 
@@ -216,12 +228,15 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
                 ("C", "shift_c_days"),
                 ("PRIME", "prime_days"),
             ]:
-                if float(row.get(col, 0)) > 0:
+                days = float(row.get(col, 0) or 0)
+                if days > 0:
+                    rate = shift_rates.get(shift, 0)
                     db.add(
                         ShiftMapping(
                             shiftallowance_id=sa.id,
                             shift_type=shift,
-                            days=float(row[col])
+                            days=days,
+                            total_allowance=days * rate
                         )
                     )
 

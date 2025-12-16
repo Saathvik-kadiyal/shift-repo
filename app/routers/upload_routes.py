@@ -20,7 +20,8 @@ async def upload_excel(
     base_url = str(request.base_url).rstrip("/")
     result = await process_excel_upload(file=file, db=db, user=current_user, base_url=base_url)
     return result
-
+ 
+ 
 
 # Error File Download Endpoint
 @router.get("/error-files/{filename}")
@@ -34,3 +35,16 @@ async def download_error_file(filename: str, current_user=Depends(get_current_us
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=filename
     )
+
+
+# @router.post("/error-rows/correct")
+# async def correct_error_rows(
+#     payload: CorrectedRowsRequest,
+#     db: Session = Depends(get_db),
+#     current_user=Depends(get_current_user),
+# ):
+#     return insert_corrected_rows(
+#         db=db,
+#         corrected_rows=[row.dict() for row in payload.corrected_rows],
+#     )
+
