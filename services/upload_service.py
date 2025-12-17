@@ -6,7 +6,6 @@ import re
 from datetime import datetime, date
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect
 from models.models import (
     UploadedFiles,
     ShiftAllowances,
@@ -14,6 +13,7 @@ from models.models import (
     ShiftsAmount,
 )
 from utils.enums import ExcelColumnMap
+
 from schemas.displayschema import CorrectedRow
 from typing import List
 import calendar
@@ -50,6 +50,7 @@ def parse_month_format(value: str):
 
 
 def load_shift_rates(db: Session) -> dict:
+    
     rates = {}
     rows = db.query(ShiftsAmount).all()
     for r in rows:
@@ -77,36 +78,6 @@ def delete_existing_emp_month(db: Session, emp_id, duration_month, payroll_month
 
     db.flush()
 
-
-def validate_excel_columns_against_db(df: pd.DataFrame, db: Session):
-    inspector = inspect(db.bind)
-
-    db_columns = {
-        col["name"]
-        for col in inspector.get_columns(ShiftAllowances.__tablename__)
-    }
-
-    excel_columns = set(df.columns)
-
-    allowed_extra_columns = {
-        "shift_a_days",
-        "shift_b_days",
-        "shift_c_days",
-        "prime_days",
-        "total_days",
-    }
-
-    invalid_columns = excel_columns - db_columns - allowed_extra_columns
-
-    if invalid_columns:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Invalid columns found in uploaded file",
-                "invalid_columns": sorted(list(invalid_columns)),
-                "expected_columns": sorted(list(db_columns | allowed_extra_columns)),
-            }
-        )
 
 
 def validate_excel_data(df: pd.DataFrame):
@@ -185,6 +156,7 @@ def normalize_error_rows(error_rows):
     return normalized
 
 
+
 async def process_excel_upload(file, db: Session, user, base_url: str):
 
     if not file.filename.endswith((".xls", ".xlsx")):
@@ -203,8 +175,6 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
         df = pd.read_excel(io.BytesIO(await file.read()))
         df.rename(columns={e.value: e.name for e in ExcelColumnMap}, inplace=True)
         df = df.where(pd.notnull(df), 0)
-
-        validate_excel_columns_against_db(df, db)
 
         clean_df, error_df = validate_excel_data(df)
 
