@@ -6,29 +6,32 @@ from utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/employee-details", tags=["Search Details"])
 
+
 @router.get("/Search")
 def fetch_employee_details(
     emp_id: str | None = Query(None),
     account_manager: str | None = Query(None),
-    department: str | None = Query(None),   
-    client: str | None = Query(None),       
+    department: str | None = Query(None),
+    client: str | None = Query(None),
     start_month: str | None = Query(None),
     end_month: str | None = Query(None),
-    start: int = Query(0, ge=0),
-    limit: int = Query(10, gt=0),
+
+    start: int | None = Query(None, ge=0),
+    limit: int | None = Query(None, gt=0),
+
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
     total_records, data = get_employee_details(
-        db,
-        emp_id,
-        account_manager,
-        department,      
-        client,          
-        start_month,
-        end_month,
-        start,
-        limit
+        db=db,
+        emp_id=emp_id,
+        account_manager=account_manager,
+        department=department,
+        client=client,
+        start_month=start_month,
+        end_month=end_month,
+        start=start,
+        limit=limit,
     )
 
     return {

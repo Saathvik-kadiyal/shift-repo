@@ -14,6 +14,10 @@ from models.models import (
 )
 from utils.enums import ExcelColumnMap
 
+from schemas.displayschema import CorrectedRow
+from typing import List
+import calendar
+
 
 TEMP_FOLDER = "media/error_excels"
 os.makedirs(TEMP_FOLDER, exist_ok=True)
@@ -267,3 +271,224 @@ async def process_excel_upload(file, db: Session, user, base_url: str):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def parse_yyyy_mm(value: str) -> date:
+    if not value:
+        raise HTTPException(
+            status_code=400,
+            detail="Month is required in YYYY-MM format"
+        )
+
+    try:
+        return datetime.strptime(value, "%Y-%m").date().replace(day=1)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid month format. Expected YYYY-MM"
+        )
+
+
+def validate_not_future_month(month_date: date, field_name: str):
+    today = date.today().replace(day=1)
+    if month_date > today:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} cannot be a future month"
+        )
+
+
+def validate_half_day(value: float, field_name: str):
+    if value < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be non-negative"
+        )
+
+    if (value * 2) % 1 != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be in 0.5 increments (e.g. 1, 1.5, 7.5)"
+        )
+
+
+def validate_shift_days(row: CorrectedRow) -> float:
+    shifts = {
+        "shift_a_days": row.shift_a_days or 0,
+        "shift_b_days": row.shift_b_days or 0,
+        "shift_c_days": row.shift_c_days or 0,
+        "prime_days": row.prime_days or 0,
+    }
+
+    total = 0.0
+
+    for name, value in shifts.items():
+        try:
+            value = float(value)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} must be numeric"
+            )
+
+        validate_half_day(value, name)
+        total += value
+
+    if total <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one shift day must be greater than 0"
+        )
+
+    return total
+
+
+def days_in_month(month_date: date) -> int:
+    return calendar.monthrange(month_date.year, month_date.month)[1]
+
+
+def load_shift_rates(db: Session) -> dict:
+    rates = {}
+    rows = db.query(ShiftsAmount).all()
+    for r in rows:
+        if r.shift_type:
+            rates[r.shift_type.upper()] = float(r.amount or 0)
+    return rates
+
+
+def update_corrected_rows(
+    db: Session,
+    corrected_rows: List[CorrectedRow]
+):
+    if not corrected_rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No corrected rows provided"
+        )
+
+    failed_rows = []
+    shift_rates = load_shift_rates(db)
+
+    for row in corrected_rows:
+        try:
+            
+            if not row.emp_id or not row.duration_month or not row.project:
+                raise HTTPException(
+                    status_code=400,
+                    detail="emp_id, duration_month and project are required"
+                )
+
+            
+            duration_month = parse_yyyy_mm(row.duration_month)
+            payroll_month = parse_yyyy_mm(row.payroll_month)
+
+            
+            validate_not_future_month(duration_month, "duration_month")
+            validate_not_future_month(payroll_month, "payroll_month")
+
+            if duration_month == payroll_month:
+                raise HTTPException(
+                    status_code=400,
+                    detail="duration_month and payroll_month cannot be the same"
+                )
+
+            if payroll_month < duration_month:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Payroll month cannot be earlier than duration month"
+                )
+
+         
+            total_shift_days = validate_shift_days(row)
+
+            duration_month_days = days_in_month(duration_month)
+            if total_shift_days > duration_month_days:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Total shift days ({total_shift_days}) exceeds "
+                        f"duration month days ({duration_month_days})"
+                    )
+                )
+
+       
+            sa = (
+                db.query(ShiftAllowances)
+                .filter(
+                    ShiftAllowances.emp_id == row.emp_id,
+                    ShiftAllowances.duration_month == duration_month,
+                    ShiftAllowances.payroll_month == payroll_month,
+                )
+                .first()
+            )
+
+            if not sa:
+                sa = ShiftAllowances(
+                    emp_id=row.emp_id,
+                    duration_month=duration_month,
+                    payroll_month=payroll_month,
+                    project=row.project,
+                )
+                db.add(sa)
+                db.flush()
+            else:
+                sa.project = row.project
+                db.query(ShiftMapping).filter(
+                    ShiftMapping.shiftallowance_id == sa.id
+                ).delete()
+
+            shift_map = {
+                "A": row.shift_a_days,
+                "B": row.shift_b_days,
+                "C": row.shift_c_days,
+                "PRIME": row.prime_days,
+            }
+
+            for shift_type, days in shift_map.items():
+                if days and float(days) > 0:
+                    rate = shift_rates.get(shift_type, 0)
+                    allowance = float(days) * rate
+
+                    db.add(
+                        ShiftMapping(
+                            shiftallowance_id=sa.id,
+                            shift_type=shift_type,
+                            days=float(days),
+                            total_allowance=allowance,
+                        )
+                    )
+
+        except HTTPException as e:
+            db.rollback()
+            failed_rows.append({
+                "emp_id": row.emp_id,
+                "duration_month": row.duration_month,
+                "project": row.project,
+                "reason": e.detail,
+            })
+
+        except Exception as e:
+            db.rollback()
+            failed_rows.append({
+                "emp_id": row.emp_id,
+                "duration_month": row.duration_month,
+                "project": row.project,
+                "reason": str(e),
+            })
+
+    
+    if failed_rows:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Validation failed",
+                "failed_rows": failed_rows
+            }
+        )
+
+    db.commit()
+
+    return {
+        "message": "Rows inserted/updated successfully",
+        "records_processed": len(corrected_rows)
+    }
