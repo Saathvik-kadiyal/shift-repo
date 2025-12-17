@@ -2,7 +2,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import extract, func
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
-from datetime import datetime
+from datetime import datetime,date
 from typing import Optional
 import pandas as pd
 from io import BytesIO
@@ -108,16 +108,60 @@ def fetch_shift_data(db: Session, start: int, limit: int):
 
     return selected_month, total_records, result, message
 
+
 def parse_shift_value(value):
     if value is None or str(value).strip() == "":
         return 0.0
     try:
         v = float(value)
-    except:
-        raise HTTPException(status_code=400, detail=f"Invalid shift value '{value}'. Only numeric allowed.")
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid shift value '{value}'. Only numeric allowed."
+        )
     if v < 0:
-        raise HTTPException(status_code=400, detail="Negative days not allowed.")
+        raise HTTPException(
+            status_code=400,
+            detail="Negative days not allowed."
+        )
     return v
+
+
+def validate_half_day(value: float, field_name: str):
+    if value is None:
+        return
+
+    if value < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be non-negative"
+        )
+
+    if (value * 2) % 1 != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be in 0.5 increments (e.g. 1, 1.5, 7.5)"
+        )
+
+
+def validate_not_future_month(month_date: date, field_name: str):
+    today = date.today().replace(day=1)
+    if month_date > today:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} cannot be a future month"
+        )
+
+
+def _load_shift_rates(db: Session):
+    from models.models import ShiftsAmount
+
+    rates = {}
+    for r in db.query(ShiftsAmount).all():
+        if r.shift_type:
+            rates[r.shift_type.upper()] = float(r.amount or 0)
+    return rates
+
 
 
 def update_shift_service(
@@ -130,86 +174,136 @@ def update_shift_service(
     allowed_fields = ["shift_a", "shift_b", "shift_c", "prime"]
     unknown = [k for k in updates if k not in allowed_fields]
     if unknown:
-        raise HTTPException(status_code=400, detail=f"Invalid fields: {unknown}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid fields: {unknown}"
+        )
 
-    parsed = {k: parse_shift_value(v) for k, v in updates.items()}
+    parsed = {}
+    for k, v in updates.items():
+        val = parse_shift_value(v)
+        validate_half_day(val, k)
+        parsed[k] = val
 
-    key_map = {"shift_a": "A", "shift_b": "B", "shift_c": "C", "prime": "PRIME"}
-    mapped_updates = {key_map[k]: parsed[k] for k in parsed}
+    key_map = {
+        "shift_a": "A",
+        "shift_b": "B",
+        "shift_c": "C",
+        "prime": "PRIME"
+    }
+
+  
+    mapped_updates = {
+        key_map[k]: (parsed[k] if parsed[k] is not None else 0.0)
+        for k in parsed
+    }
+
+   
 
     try:
-        payroll_dt = datetime.strptime(payroll_month, "%Y-%m")
-    except:
-        raise HTTPException(status_code=400, detail="Invalid payroll_month format. Use YYYY-MM")
+        payroll_dt = datetime.strptime(payroll_month, "%Y-%m").date().replace(day=1)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid payroll_month format. Use YYYY-MM"
+        )
 
-    max_days_in_month = monthrange(payroll_dt.year, payroll_dt.month)[1]
+    if not duration_month:
+        raise HTTPException(
+            status_code=400,
+            detail="duration_month is required"
+        )
+
+    try:
+        duration_dt = datetime.strptime(duration_month, "%Y-%m").date().replace(day=1)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid duration_month format. Use YYYY-MM"
+        )
+
+
+    validate_not_future_month(duration_dt, "duration_month")
+    validate_not_future_month(payroll_dt, "payroll_month")
+
+    if duration_month == payroll_month:
+        raise HTTPException(
+            status_code=400,
+            detail="duration_month and payroll_month cannot be the same"
+        )
+
+    if payroll_dt < duration_dt:
+        raise HTTPException(
+            status_code=400,
+            detail="Payroll month cannot be earlier than duration month"
+        )
+
+   
+    max_days_in_month = monthrange(duration_dt.year, duration_dt.month)[1]
 
     if sum(mapped_updates.values()) > max_days_in_month:
         raise HTTPException(
             status_code=400,
-            detail=f"Total days ({sum(mapped_updates.values())}) cannot exceed {max_days_in_month} days of payroll month."
+            detail=(
+                f"Total days ({sum(mapped_updates.values())}) cannot exceed "
+                f"{max_days_in_month} days of duration month."
+            )
         )
 
-    duration_dt = None
-    if duration_month:
-        try:
-            duration_dt = datetime.strptime(duration_month, "%Y-%m")
-        except:
-            raise HTTPException(status_code=400, detail="Invalid duration_month format. Use YYYY-MM")
 
     q = db.query(ShiftAllowances).filter(
         ShiftAllowances.emp_id == emp_id,
-        extract("year", ShiftAllowances.payroll_month) == payroll_dt.year,
-        extract("month", ShiftAllowances.payroll_month) == payroll_dt.month
+        extract("year", ShiftAllowances.duration_month) == duration_dt.year,
+        extract("month", ShiftAllowances.duration_month) == duration_dt.month
     )
-    if duration_dt:
-        q = q.filter(
-            extract("year", ShiftAllowances.duration_month) == duration_dt.year,
-            extract("month", ShiftAllowances.duration_month) == duration_dt.month
-        )
 
     rec = q.first()
     if not rec:
-        raise HTTPException(status_code=404, detail=f"No shift record found for employee {emp_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No shift record found for employee {emp_id}"
+        )
+
 
     rates = _load_shift_rates(db)
-
     existing = {m.shift_type.upper(): m for m in rec.shift_mappings or []}
 
     for stype, days in mapped_updates.items():
-        stype_u = stype.upper()
-        if stype_u in existing:
-            mapping = existing[stype_u]
+        if stype in existing:
+            mapping = existing[stype]
             mapping.days = days
         else:
             mapping = ShiftMapping(
                 shiftallowance_id=rec.id,
-                shift_type=stype_u,
+                shift_type=stype,
                 days=days,
                 total_allowance=0.0
             )
             db.add(mapping)
-            existing[stype_u] = mapping
+            existing[stype] = mapping
 
-        rate = rates.get(stype_u, 0.0)
+        rate = rates.get(stype, 0.0)
         mapping.total_allowance = float(days) * rate
 
     db.commit()
     db.refresh(rec)
 
-    total_allowance = 0.0
+
     total_days = 0.0
+    total_allowance = 0.0
     details = []
 
     for m in rec.shift_mappings:
         days = float(m.days or 0)
         total_days += days
 
-        
         if total_days > max_days_in_month:
             raise HTTPException(
                 status_code=400,
-                detail=f"Total assigned days ({total_days}) exceed the payroll month limit ({max_days_in_month})."
+                detail=(
+                    f"Total assigned days ({total_days}) exceed "
+                    f"the duration month limit ({max_days_in_month})."
+                )
             )
 
         rate = rates.get(m.shift_type.upper(), 0.0)

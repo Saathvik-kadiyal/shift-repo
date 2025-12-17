@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from db import get_db
 from utils.dependencies import get_current_user
-from services.upload_service import process_excel_upload, TEMP_FOLDER
+from services.upload_service import process_excel_upload, TEMP_FOLDER,update_corrected_rows
 from schemas.displayschema import CorrectedRowsRequest
 
 router = APIRouter(prefix="/upload")
@@ -37,15 +37,13 @@ async def download_error_file(filename: str, current_user=Depends(get_current_us
         filename=filename
     )
 
-
-# @router.post("/error-rows/correct")
-# async def correct_error_rows(
-#     payload: CorrectedRowsRequest,
-#     db: Session = Depends(get_db),
-#     current_user=Depends(get_current_user),
-# ):
-#     return insert_corrected_rows(
-#         db=db,
-#         corrected_rows=[row.dict() for row in payload.corrected_rows],
-#     )
-
+@router.post("/correct_error_rows")
+def correct_error_rows(
+    payload: CorrectedRowsRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return update_corrected_rows(
+        db=db,
+        corrected_rows=payload.corrected_rows
+    )
