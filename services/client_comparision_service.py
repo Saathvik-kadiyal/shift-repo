@@ -396,66 +396,80 @@ def get_client_total_allowances(db: Session, start_month: str | None, end_month:
 
 
 
- 
 def get_client_departments_service(db: Session, client: str | None):
- 
+
+    
     if client is not None:
-        # Strip leading/trailing spaces
         client = client.strip()
- 
-        # Validate type
+
         if not isinstance(client, str):
             raise HTTPException(
                 status_code=400,
                 detail="Client name must be a string"
             )
- 
+
         if client == "":
             raise HTTPException(
                 status_code=400,
                 detail="Client name cannot be empty"
             )
- 
+
         if client.isdigit():
             raise HTTPException(
                 status_code=400,
                 detail="Numbers are not allowed, only strings"
             )
- 
+
+  
     if client:
         rows = (
             db.query(ShiftAllowances.department)
-            .filter(ShiftAllowances.client == client)
+            .filter(
+                ShiftAllowances.client == client,
+                ShiftAllowances.client.isnot(None)  
+            )
             .all()
         )
- 
+
         if not rows:
             raise HTTPException(
                 status_code=404,
                 detail=f"Client '{client}' not found"
             )
- 
-        departments = sorted(list({r[0] for r in rows if r[0]}))
-        return {
+
+        departments = sorted({r[0] for r in rows if r[0]})
+
+        return [{
             "client": client,
             "departments": departments
-        }
- 
-    rows = db.query(
-        ShiftAllowances.client,
-        ShiftAllowances.department
-    ).all()
- 
+        }]
+
+   
+    rows = (
+        db.query(
+            ShiftAllowances.client,
+            ShiftAllowances.department
+        )
+        .filter(ShiftAllowances.client.isnot(None))  
+        .all()
+    )
+
     result = {}
+
     for client_name, dept in rows:
-        if client_name not in result:
-            result[client_name] = set()
+        
+        if not client_name:
+            continue
+
+        result.setdefault(client_name, set())
+
         if dept:
             result[client_name].add(dept)
- 
-    final = [
-        {"client": c, "departments": sorted(list(depts))}
+
+    return [
+        {
+            "client": c,
+            "departments": sorted(list(depts))
+        }
         for c, depts in result.items()
     ]
- 
-    return final

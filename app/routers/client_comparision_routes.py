@@ -33,7 +33,7 @@ def client_total_allowances(
 ):
     return get_client_total_allowances(db, start_month, end_month, top)
 
-@router.get("/client-departments", response_model=list[ClientDeptResponse] | ClientDeptResponse)
+@router.get("/client-departments", response_model=list[ClientDeptResponse] )
 def get_client_departments(client: str | None = None, db: Session = Depends(get_db),current_user=Depends(get_current_user)):
     return get_client_departments_service(db, client)
  
