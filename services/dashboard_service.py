@@ -690,14 +690,23 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
             for d in c["department"].values():
                 finalize(d)
 
-    if payload.top != "ALL":
-        top_n = int(payload.top)
-        dashboard["clients"] = dict(
-            sorted(
-                dashboard["clients"].items(),
-                key=lambda x: x[1]["total_allowance"],
-                reverse=True
-            )[:top_n]
-        )
+    clients_sorted = sorted(
+        dashboard["clients"].items(),
+        key=lambda x: x[1]["total_allowance"],
+        reverse=True
+    )
 
+    if payload.top != "ALL":
+        clients_sorted = clients_sorted[:int(payload.top)]
+
+    dashboard["clients"] = dict(clients_sorted)
+
+    dashboard["account_manager"] = dict(
+        sorted(
+            dashboard["account_manager"].items(),
+            key=lambda x: x[1]["total_allowance"],
+            reverse=True
+        )
+    )
+    
     return {"dashboard": dashboard}
