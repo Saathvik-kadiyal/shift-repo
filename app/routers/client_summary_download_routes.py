@@ -1,9 +1,14 @@
+"""
+Routes for downloading client summary reports.
+"""
+
 from fastapi import APIRouter, Depends, Body
-from sqlalchemy.orm import Session
 from fastapi.responses import FileResponse
-from utils.dependencies import get_current_user
+from sqlalchemy.orm import Session
 from db import get_db
-from services.client_summary_download_service import client_summary_download_service
+from services.client_summary_download_service import (
+    client_summary_download_service)
+from utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/client-summary")
 
@@ -22,12 +27,15 @@ def download_client_summary_excel(
         }
     ),
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    _current_user=Depends(get_current_user),
 ):
-    file_path = client_summary_download_service(db=db, payload=payload)
+    """Generate and download the client summary Excel report."""
+    file_path = client_summary_download_service(
+        db=db,payload=payload)
 
     return FileResponse(
         path=file_path,
         filename="client_summary.xlsx",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=("application/vnd.openxmlformats-officedocument."
+        "spreadsheetml.sheet"),
     )
