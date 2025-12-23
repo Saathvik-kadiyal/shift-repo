@@ -1,9 +1,14 @@
+"""
+Routes for client summary data retrieval.
+"""
+
 from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
 from utils.dependencies import get_current_user
 
 from db import get_db
-from services.client_summary_service import client_summary_service
+from services.client_summary_service import(
+    client_summary_service)
 
 router = APIRouter(
     prefix="/client-summary",
@@ -24,6 +29,7 @@ def client_summary(
         }
     ),
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    _current_user=Depends(get_current_user)
 ):
+    """Return client summary based on provided filters."""
     return client_summary_service(db=db, payload=payload)
