@@ -167,7 +167,7 @@ def normalize_error_rows(error_rows):
 
     return normalized
 
-async def process_excel_upload(file, db: Session, user, _base_url: str):
+async def process_excel_upload(file, db: Session, user, base_url: str):
     """Process uploaded Excel file and persist valid shift records."""
 
     if not file.filename.endswith((".xls", ".xlsx")):
