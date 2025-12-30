@@ -1,16 +1,22 @@
+"""
+Upload and error file handling API test cases.
+
+This module contains integration tests for Excel upload,
+error correction, and error file download endpoints.
+"""
+
+import os
 from io import BytesIO
 from datetime import date
 import pandas as pd
-import os
 from models.models import ShiftAllowances
 from utils.enums import ExcelColumnMap
-from fastapi.testclient import TestClient
 
 TEMP_FOLDER = "media/error_excels"
 EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-# API ROUTES 
+# API ROUTES
 UPLOAD_EXCEL_URL = "/upload/"
 CORRECT_ERROR_ROWS_URL = "/upload/correct_error_rows"
 ERROR_FILE_DOWNLOAD_URL = "/upload/error-files/{filename}"
@@ -18,6 +24,9 @@ ERROR_FILE_DOWNLOAD_URL = "/upload/error-files/{filename}"
 
 # /UPLOAD/ API TESTCASES
 def test_upload_valid_excel_success(client, db_session):
+    """
+    Verify valid Excel upload inserts records successfully.
+    """
     row = {
         ExcelColumnMap.emp_id.value: "IN01800341",
         ExcelColumnMap.emp_name.value: "Test User",
@@ -56,6 +65,10 @@ def test_upload_valid_excel_success(client, db_session):
 
 
 def test_reupload_same_employee_month_overwrites(client, db_session):
+    """
+    Verify re-uploading the same employee and month overwrites
+    the existing record instead of creating duplicates.
+    """
     first = {
         ExcelColumnMap.emp_id.value: "IN01800341",
         ExcelColumnMap.duration_month.value: "Jan'25",
@@ -94,6 +107,9 @@ def test_reupload_same_employee_month_overwrites(client, db_session):
 
 
 def test_partial_invalid_rows(client):
+    """
+    Verify upload fails when Excel contains partially invalid rows.
+    """
     valid = {
         ExcelColumnMap.emp_id.value: "IN01800341",
         ExcelColumnMap.shift_a_days.value: 2,
@@ -115,6 +131,9 @@ def test_partial_invalid_rows(client):
 
 
 def test_missing_required_columns(client):
+    """
+    Verify upload fails when required columns are missing.
+    """
     row = {ExcelColumnMap.emp_id.value: "IN01801072"}
 
     excel = BytesIO()
@@ -130,6 +149,9 @@ def test_missing_required_columns(client):
 
 
 def test_all_invalid_rows(client):
+    """
+    Verify upload fails when all rows in Excel are invalid.
+    """
     row = {
         ExcelColumnMap.shift_a_days.value: -1,
         ExcelColumnMap.shift_b_days.value: -1,
@@ -150,6 +172,9 @@ def test_all_invalid_rows(client):
 
 
 def test_wrong_file_type(client):
+    """
+    Verify upload fails when file type is not Excel.
+    """
     response = client.post(
         UPLOAD_EXCEL_URL,
         files={"file": ("test.txt", b"not excel", "text/plain")}
@@ -160,6 +185,9 @@ def test_wrong_file_type(client):
 # /upload/correct_error_rows API TESTCASES
 
 def test_correct_error_rows_success(client, db_session):
+    """
+    Verify corrected error rows are processed successfully.
+    """
     payload = {
         "corrected_rows": [{
             "emp_id": "IN01800119",
@@ -180,6 +208,9 @@ def test_correct_error_rows_success(client, db_session):
 
 
 def test_correct_error_rows_empty_payload(client):
+    """
+    Verify API rejects empty corrected_rows payload.
+    """
     response = client.post(
         CORRECT_ERROR_ROWS_URL,
         json={"corrected_rows": []}
@@ -190,6 +221,9 @@ def test_correct_error_rows_empty_payload(client):
 
 
 def test_correct_error_rows_invalid_month_format(client):
+    """
+    Verify API rejects invalid month format in corrected rows.
+    """
     payload = {
         "corrected_rows": [{
             "emp_id": "IN01800119",
@@ -207,6 +241,9 @@ def test_correct_error_rows_invalid_month_format(client):
 
 
 def test_correct_error_rows_future_month(client):
+    """
+    Verify API rejects future month values.
+    """
     payload = {
         "corrected_rows": [{
             "emp_id": "IN01800119",
@@ -224,6 +261,9 @@ def test_correct_error_rows_future_month(client):
 
 
 def test_correct_error_rows_same_month(client):
+    """
+    Verify API rejects same duration and payroll month.
+    """
     payload = {
         "corrected_rows": [{
             "emp_id": "IN01800119",
@@ -241,6 +281,9 @@ def test_correct_error_rows_same_month(client):
 
 
 def test_correct_error_rows_invalid_shift_days(client):
+    """
+    Verify API rejects invalid shift day values.
+    """
     payload = {
         "corrected_rows": [{
             "emp_id": "IN01800119",
@@ -262,6 +305,9 @@ def test_correct_error_rows_invalid_shift_days(client):
 # /upload/error-files{filename} API TESTCASES
 
 def test_download_error_file_success(client):
+    """
+    Verify error Excel file is downloadable when it exists.
+    """
     os.makedirs(TEMP_FOLDER, exist_ok=True)
     filename = "error_report.xlsx"
     file_path = os.path.join(TEMP_FOLDER, filename)
@@ -278,6 +324,9 @@ def test_download_error_file_success(client):
 
 
 def test_download_error_file_not_found(client):
+    """
+    Verify API returns 404 when error file does not exist.
+    """
     response = client.get(ERROR_FILE_DOWNLOAD_URL.format(filename="missing.xlsx"))
 
     assert response.status_code == 404
@@ -285,6 +334,9 @@ def test_download_error_file_not_found(client):
 
 
 def test_download_error_file_invalid_extension(client):
+    """
+    Verify API handles non-excel extensions safely.
+    """
     os.makedirs(TEMP_FOLDER, exist_ok=True)
     filename = "error_report.txt"
     file_path = os.path.join(TEMP_FOLDER, filename)
@@ -301,13 +353,22 @@ def test_download_error_file_invalid_extension(client):
 
 
 def test_download_error_file_path_traversal(client):
+    """
+    Verify API blocks path traversal attempts.
+    """
     response = client.get(ERROR_FILE_DOWNLOAD_URL.format(filename="../secret.txt"))
     assert response.status_code == 404
-   
+
 def test_download_error_file_nested_path(client):
+    """
+    Verify API blocks nested file path access.
+    """
     response = client.get(ERROR_FILE_DOWNLOAD_URL.format(filename="subfolder/file.xlsx"))
     assert response.status_code == 404
-  
+
 def test_download_error_file_empty_filename(client):
+    """
+    Verify API returns 404 for empty filename path.
+    """
     response = client.get("/upload/error-files/")
     assert response.status_code == 404
