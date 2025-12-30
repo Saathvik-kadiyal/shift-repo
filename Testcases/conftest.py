@@ -1,15 +1,24 @@
+"""
+Pytest fixtures for FastAPI application testing.
+
+This module provides database setup, authenticated and unauthenticated
+test clients, and dependency overrides required for API integration tests.
+"""
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
 from main import app
 from db import Base, get_db
 from utils.dependencies import get_current_user
 
-
+# pylint: disable=too-few-public-methods, redefined-builtin
 # ---------------- Fake User ----------------
 class FakeUser:
+    """
+    Mock user object used for authenticated test scenarios.
+    """
     def __init__(
         self,
         id=1,
@@ -39,6 +48,10 @@ TestingSessionLocal = sessionmaker(
 # ---------------- Create / Drop Tables ----------------
 @pytest.fixture(scope="session", autouse=True)
 def create_test_db():
+    """
+    Create all database tables before test session
+    and drop them after tests complete.
+    """
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
@@ -47,6 +60,10 @@ def create_test_db():
 # ---------------- DB Session Fixture ----------------
 @pytest.fixture()
 def db_session():
+    """
+    Provide a transactional database session for tests.
+    Rolls back after each test.
+    """
     db = TestingSessionLocal()
     try:
         yield db
@@ -54,10 +71,18 @@ def db_session():
         db.rollback()
         db.close()
 
-"""Two fixtures exist because authentication success and failure require opposite dependency behavior"""
+"""Two fixtures exist because authentication success and failure
+require opposite dependency behavior"""
 # ---------------- AUTHENTICATED CLIENT ----------------
 @pytest.fixture()
 def client(db_session):
+    """
+    Provide an authenticated FastAPI test client.
+
+    Overrides:
+    - get_db → test database session
+    - get_current_user → FakeUser instance
+    """
     def override_get_db():
         yield db_session
 
@@ -76,6 +101,12 @@ def client(db_session):
 # # ---------------- UNAUTHENTICATED CLIENT ----------------
 @pytest.fixture()
 def unauth_client(db_session):
+    """
+    Provide an unauthenticated FastAPI test client.
+
+    Overrides:
+    - get_db → test database session
+    """
     def override_get_db():
         yield db_session
 
@@ -85,5 +116,3 @@ def unauth_client(db_session):
         yield client
 
     app.dependency_overrides.clear()
-
-
