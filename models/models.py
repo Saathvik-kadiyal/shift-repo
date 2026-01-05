@@ -76,7 +76,8 @@ class ShiftAllowances(Base):
     shift_mappings = relationship("ShiftMapping", back_populates="shift_allowance")
 
     __table_args__ = (
-        UniqueConstraint('duration_month', 'payroll_month', 'emp_id', name='uix_payroll_employee'),
+        UniqueConstraint('duration_month', 'payroll_month', 'emp_id','client',
+                         name='uix_payroll_employee'),
     )
 
 
