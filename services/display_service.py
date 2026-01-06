@@ -9,6 +9,16 @@ from io import BytesIO
 from fastapi.responses import StreamingResponse
 from utils.client_enums import Company
 from calendar import monthrange
+from diskcache import Cache
+
+cache = Cache("./diskcache/latest_month")
+LATEST_MONTH_KEY = "client_summary:latest_month"
+
+def is_latest_month(db: Session, duration_dt: date) -> bool:
+    latest_month = db.query(func.max(ShiftAllowances.duration_month)).scalar()
+    if not latest_month:
+        return False
+    return latest_month.year == duration_dt.year and latest_month.month == duration_dt.month
 
 def _load_shift_rates(db: Session) -> dict:
     """Return dict like {'A': 300.0, 'B': 350.0, ...}"""
@@ -322,6 +332,8 @@ def update_shift_service(
         })
 
     db.commit()
+    if is_latest_month(db, duration_dt):
+        cache.pop(LATEST_MONTH_KEY, None)
 
     return {
         "message": "Shift updated successfully",
