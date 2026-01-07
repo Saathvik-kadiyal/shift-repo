@@ -574,16 +574,14 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
                 .in_(quarter_months)
             )
 
-    # -------------------- ALL DEPARTMENTS (NORMALIZED) --------------------
-    all_departments = {
+    # -------------------- FETCH REAL DEPARTMENTS --------------------
+    all_departments = [
         d[0]
         for d in db.query(ShiftAllowances.department)
         .filter(ShiftAllowances.department.isnot(None))
         .distinct()
         .all()
-    }
-    all_departments.add("Unknown")
-    all_departments = list(all_departments)
+    ]
 
     # -------------------- HELPERS --------------------
     def empty_node(with_dept=False):
@@ -597,7 +595,10 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
                 d: {
                     "total_allowance": 0,
                     "head_count": set(),
-                    **{f"shift_{s}": {"total": 0, "head_count": set()} for s in SHIFT_TYPES},
+                    **{
+                        f"shift_{s}": {"total": 0, "head_count": set()}
+                        for s in SHIFT_TYPES
+                    },
                 }
                 for d in all_departments
             }
@@ -612,13 +613,13 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
             ShiftAllowances.account_manager,
             ShiftMapping.shift_type,
             ShiftMapping.days,
-            ShiftsAmount.amount
+            ShiftsAmount.amount,
         )
         .join(ShiftMapping, ShiftMapping.shiftallowance_id == ShiftAllowances.id)
         .join(
             ShiftsAmount,
             extract("year", ShiftAllowances.duration_month)
-            == func.cast(ShiftsAmount.payroll_year, Integer)
+            == func.cast(ShiftsAmount.payroll_year, Integer),
         )
         .filter(ShiftMapping.shift_type == ShiftsAmount.shift_type)
     )
@@ -627,8 +628,8 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
         conditions = []
         for client, depts in payload.clients.items():
             conditions.append(
-                (ShiftAllowances.client == client) &
-                (ShiftAllowances.department.in_(depts))
+                (ShiftAllowances.client == client)
+                & (ShiftAllowances.department.in_(depts))
             )
         q = q.filter(or_(*conditions))
 
@@ -645,23 +646,26 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
         "head_count": set(),
         **{f"shift_{s}": {"total": 0, "head_count": set()} for s in SHIFT_TYPES},
         "clients": {},
-        "account_manager": {}
+        "account_manager": {},
     }
 
     # -------------------- ACCUMULATION --------------------
     for emp_id, client, dept, am, shift, days, amount in rows:
-        dept = dept or "Unknown"
-        am = am or "Unknown"
+
+        # SAFETY: ignore unexpected data instead of crashing
+        if dept not in all_departments:
+            continue
 
         allowance = float(days) * float(amount)
+        am = am or "Unassigned"
 
-        # --- Overall ---
+        # ---- Overall ----
         dashboard["total_allowance"] += allowance
         dashboard["head_count"].add(emp_id)
         dashboard[f"shift_{shift}"]["total"] += allowance
         dashboard[f"shift_{shift}"]["head_count"].add(emp_id)
 
-        # --- Client ---
+        # ---- Client ----
         client_data = dashboard["clients"].setdefault(
             client, empty_node(with_dept=True)
         )
@@ -676,7 +680,7 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
         dept_data[f"shift_{shift}"]["total"] += allowance
         dept_data[f"shift_{shift}"]["head_count"].add(emp_id)
 
-        # --- Account Manager ---
+        # ---- Account Manager ----
         am_data = dashboard["account_manager"].setdefault(
             am, {**empty_node(), "clients": {}}
         )
@@ -699,11 +703,13 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
         am_dept[f"shift_{shift}"]["total"] += allowance
         am_dept[f"shift_{shift}"]["head_count"].add(emp_id)
 
-    # -------------------- FINALIZE --------------------
+    # -------------------- FINALIZE COUNTS --------------------
     def finalize(node):
         node["head_count"] = len(node["head_count"])
         for s in SHIFT_TYPES:
-            node[f"shift_{s}"]["head_count"] = len(node[f"shift_{s}"]["head_count"])
+            node[f"shift_{s}"]["head_count"] = len(
+                node[f"shift_{s}"]["head_count"]
+            )
 
     finalize(dashboard)
 
@@ -724,7 +730,7 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
         sorted(
             dashboard["clients"].items(),
             key=lambda x: x[1]["total_allowance"],
-            reverse=True
+            reverse=True,
         )[: None if payload.top == "ALL" else int(payload.top)]
     )
 
@@ -732,7 +738,7 @@ def get_client_dashboard_summary(db: Session, payload: DashboardFilterRequest):
         sorted(
             dashboard["account_manager"].items(),
             key=lambda x: x[1]["total_allowance"],
-            reverse=True
+            reverse=True,
         )
     )
 
