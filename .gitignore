@@ -2,9 +2,11 @@
 .env
 *.env
 
-# Cache
+# Python cache (GLOBAL + NESTED)
 __pycache__/
 **/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
 diskcache/
 
 # Python artifacts
@@ -12,6 +14,10 @@ diskcache/
 *.pyo
 *.pyd
 *.log
+
+# Database
+*.db
+test.db
 
 # Virtual environments
 venv/
@@ -31,26 +37,13 @@ dist/
 Thumbs.db
 
 # App runtime folders
-/media/
- /tmp/
- /uploads/
- /error_excels/
-
-# Ignore __init__ only if you REALLY want to
-#__init__.py
-# Temporary files
+media/
+tmp/
+uploads/
+error_excels/
 temp_files/
-**/temp_files/
+exports/
 
-# Test folders (only if you really don't want them in repo)
+# Tests (ONLY if intentionally excluded)
 Testcases/
 **/Testcases/
-
-
-# Pytest cache
-.pytest_cache/
-**/.pytest_cache/
-
-# Exported files (excels, csvs, reports)
-exports/
-**/exports/
