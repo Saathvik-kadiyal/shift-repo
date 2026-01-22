@@ -1,9 +1,13 @@
 # Environment files
 .env
 *.env
-diskcache/
-# Python cache and build artifacts
+
+# Cache
 __pycache__/
+**/__pycache__/
+diskcache/
+
+# Python artifacts
 *.pyc
 *.pyo
 *.pyd
@@ -18,15 +22,35 @@ build/
 dist/
 *.egg-info/
 
-# IDE/editor folders
+# IDE/editor
 .vscode/
 .idea/
 
 # OS files
 .DS_Store
 Thumbs.db
-/media/*
-/tmp/
-/uploads/
-/error_excels/
-__init__.py
+
+# App runtime folders
+/media/
+ /tmp/
+ /uploads/
+ /error_excels/
+
+# Ignore __init__ only if you REALLY want to
+#__init__.py
+# Temporary files
+temp_files/
+**/temp_files/
+
+# Test folders (only if you really don't want them in repo)
+Testcases/
+**/Testcases/
+
+
+# Pytest cache
+.pytest_cache/
+**/.pytest_cache/
+
+# Exported files (excels, csvs, reports)
+exports/
+**/exports/
