@@ -1,49 +1,77 @@
 """
-Routes for exporting filtered shift data as Excel files.
+Excel Routes for Shift Allowance Data.
+ 
+Provides an API endpoint to download filtered employee shift allowance
+data as an Excel file. Uses openpyxl for fast Excel generation.
 """
-
-
+ 
+ 
 import io
-
-from fastapi import APIRouter, Depends, Query
+from typing import Optional
+ 
+ 
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-
+from pydantic import BaseModel
+ 
+ 
 from db import get_db
-from services.get_excel_service import export_filtered_excel
+from services.get_excel_service import export_filtered_excel_openpyxl
 from utils.dependencies import get_current_user
-
+ 
 router = APIRouter(prefix="/excel", tags=["Excel Data"])
-
+ 
+ 
+class ExcelFilters(BaseModel):
+    """Optional filters for exporting shift allowance data."""
+    emp_id: Optional[str] = None
+    account_manager: Optional[str] = None
+    department: Optional[str] = None
+    client: Optional[str] = None
+    start_month: Optional[str] = None
+    end_month: Optional[str] = None
+ 
+ 
 @router.get("/download")
 def download_excel(
-    emp_id: str | None = Query(None),
-    account_manager: str | None = Query(None),
-    department: str | None = Query(None),
-    client: str | None = Query(None),
-    start_month: str | None = Query(None),
-    end_month: str | None = Query(None),
+    filters: ExcelFilters = Depends(),
     db: Session = Depends(get_db),
-    _current_user = Depends(get_current_user),
+    _current_user=Depends(get_current_user),
 ):
-    """Download filtered shift data as an Excel file."""
-
-    df = export_filtered_excel(
+    """
+    Download filtered shift allowance data as an Excel file.
+ 
+    Filters (all optional):
+        - emp_id: Employee ID
+        - account_manager: Account manager name
+        - department: Employee department
+        - client: Client name
+        - start_month / end_month: Month range in YYYY-MM format
+ 
+    Returns:
+        StreamingResponse: Excel file stream with proper headers for download.
+    """
+    # Generate workbook using service
+    wb = export_filtered_excel_openpyxl(
         db=db,
-        emp_id=emp_id,
-        account_manager=account_manager,
-        start_month=start_month,
-        end_month=end_month,
-        department=department,
-        client=client
+        emp_id=filters.emp_id,
+        account_manager=filters.account_manager,
+        department=filters.department,
+        client=filters.client,
+        start_month=filters.start_month,
+        end_month=filters.end_month,
     )
-
+ 
+    # Save workbook to in-memory bytes buffer
     file_stream = io.BytesIO()
-    df.to_excel(file_stream, index=False)
+    wb.save(file_stream)
     file_stream.seek(0)
-
+ 
     return StreamingResponse(
         file_stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=shift_data.xlsx"}
     )
+ 
+ 
