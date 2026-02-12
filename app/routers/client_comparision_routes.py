@@ -6,9 +6,10 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from db import get_db
 from schemas.displayschema import ClientDeptResponse
+from schemas.dashboardschema import ClientTotalAllowanceFilter,DashboardFilter,DashboardResponse
 from services.client_comparision_service import (client_comparison_service,
                                                  get_client_total_allowances,
-                                                 get_client_departments_service)
+                                                 get_client_departments_service,get_client_dashboard)
 from utils.dependencies import get_current_user
 
 router = APIRouter()
@@ -30,16 +31,15 @@ def client_comparison(
         end_month=end_month,
         account_manager=account_manager,
     )
-@router.get("/client-total-allowances")
+@router.post("/client-total-allowances-piechart")
 def client_total_allowances(
-    start_month: str | None = None,
-    end_month: str | None = None,
-    top: str | None = None,
+    filters: ClientTotalAllowanceFilter,
     db: Session = Depends(get_db),
     _current_user = Depends(get_current_user)
 ):
-    """Return total allowances grouped by client."""
-    return get_client_total_allowances(db, start_month, end_month, top)
+    """Return total allowances grouped by client with filters."""
+    return get_client_total_allowances(db, filters)
+
 
 @router.get("/client-departments",
             response_model=list[ClientDeptResponse])
@@ -48,3 +48,19 @@ def get_client_departments(client: str | None = None,
                            _current_user=Depends(get_current_user)):
     """Return department-wise data for a client."""
     return get_client_departments_service(db, client)
+
+@router.post("/dashboard", response_model=DashboardResponse)
+def dashboard(
+    filters: DashboardFilter,
+    db: Session = Depends(get_db),
+    _current_user = Depends(get_current_user)
+):
+    """
+    Returns dashboard summary per client with period resolution, future messages,
+    and all filters applied. Prioritizes a single selected client:
+     - client first,
+     - then period,
+     - then top (won't drop that client).
+    """
+    return get_client_dashboard(db, filters)
+

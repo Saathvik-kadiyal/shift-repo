@@ -12,7 +12,7 @@ from utils.client_enums import Company
 from schemas.dashboardschema import DashboardFilterRequest
 import calendar
 from utils.shift_config import get_all_shift_keys  
-
+from collections import defaultdict
 
 def validate_month_format(month: str):
     """Validate and parse a YYYY-MM month string into a date."""
@@ -514,10 +514,7 @@ def get_vertical_bar_service(
 
     return result
 
-try:
-    from utils.shift_config import get_all_shift_keys  
-except Exception:
-    get_all_shift_keys = None  
+
 
 def _load_shift_types() -> Set[str]:
     """
@@ -526,13 +523,14 @@ def _load_shift_types() -> Set[str]:
     """
     try:
         if callable(get_all_shift_keys):
-            return {str(s).strip().upper() for s in get_all_shift_keys()}
+            return {str(s).strip().upper() for s in get_all_shift_keys()}  # type: ignore
     except Exception:
         pass
     return set()
 
 
 SHIFT_TYPES: Set[str] = _load_shift_types()
+
 
 def _payload_to_dict(payload: Any) -> dict:
     """
@@ -548,12 +546,12 @@ def _payload_to_dict(payload: Any) -> dict:
         return {k: v for k, v in payload.items() if v is not None}
     if hasattr(payload, "model_dump"):  # Pydantic v2
         try:
-            return payload.model_dump(exclude_none=True)  
+            return payload.model_dump(exclude_none=True)
         except Exception:
             pass
     if hasattr(payload, "dict"):  # Pydantic v1
         try:
-            return payload.dict(exclude_none=True)  
+            return payload.dict(exclude_none=True)
         except Exception:
             pass
     try:
@@ -570,6 +568,7 @@ def clean_str(v: Any) -> str:
     s = v.strip() if isinstance(v, str) else str(v).strip()
     s = s.replace("\u200b", "").replace("\u00a0", "").strip()
 
+   
     for _ in range(2):
         if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
             s = s[1:-1].strip()
@@ -612,6 +611,7 @@ def _normalize_dash(s: str) -> str:
     """Convert dash variants to standard '-'."""
     return (s or "").replace("–", "-").replace("—", "-").replace("−", "-")
 
+
 def _coerce_int_list(values: Any, field_name: str, four_digit_year: bool = False) -> List[int]:
     """
     Accept list of ints/strings and return list[int]. Raise 400 on bad input.
@@ -634,7 +634,7 @@ def _coerce_int_list(values: Any, field_name: str, four_digit_year: bool = False
             if not s.isdigit() or len(s) != 4:
                 raise HTTPException(
                     status_code=400,
-                    detail="Invalid year. Year must be in YYYY format (e.g., 2024)."
+                    detail="Invalid year. Year must be in YYYY format (e.g., 2024).",
                 )
             out.append(int(s))
             continue
@@ -645,6 +645,7 @@ def _coerce_int_list(values: Any, field_name: str, four_digit_year: bool = False
             raise HTTPException(status_code=400, detail=f"Invalid value in '{field_name}': {v}")
 
     return out
+
 
 def parse_sort_order(value: Any) -> str:
     v = clean_str(value).lower()
@@ -670,9 +671,8 @@ def apply_sort_dict_dashboard(data: Dict[str, dict], sort_by: str, sort_order: s
     if sort_order == "default" or not sort_by:
         return data
 
-    reverse = (sort_order == "desc")
+    reverse = sort_order == "desc"
 
-   
     if sort_by in ("client", "client_partner"):
         return dict(sorted(data.items(), key=lambda kv: (kv[0] or "").lower(), reverse=reverse))
 
@@ -682,8 +682,8 @@ def apply_sort_dict_dashboard(data: Dict[str, dict], sort_by: str, sort_order: s
         "total_allowance": "total_allowance",
     }
     k = key_map.get(sort_by, sort_by)
-
     return dict(sorted(data.items(), key=lambda kv: kv[1].get(k, 0) or 0, reverse=reverse))
+
 
 def parse_shifts(value: Any) -> Optional[List[str]]:
     """Returns list of shift codes or None if ALL/empty."""
@@ -701,7 +701,6 @@ def validate_shifts(payload: Any) -> None:
     shifts = parse_shifts(payload_dict.get("shifts", None))
     if not shifts:
         return
-   
     if SHIFT_TYPES:
         invalid = [s for s in shifts if s not in SHIFT_TYPES]
         if invalid:
@@ -767,6 +766,7 @@ def parse_headcount_limit(value: Any) -> Optional[int]:
 
     return max(limits) if limits else None
 
+
 def _previous_year_month(year: int, month: int) -> Tuple[int, int]:
     if month == 1:
         return year - 1, 12
@@ -779,97 +779,162 @@ def _last_n_month_pairs(end_year: int, end_month: int, n: int = 12) -> List[Tupl
     for _ in range(n):
         pairs.append((y, m))
         y, m = _previous_year_month(y, m)
-    return sorted(set(pairs))
+    return sorted(set(pairs))  
 
-
-def validate_years_months(payload: Any, db: Session = None) -> List[Tuple[int, int]]:
+def validate_years_months_with_warnings(payload: Any, db: Session = None) -> Tuple[List[Tuple[int, int]], List[str]]:
     """
-    Returns allowed (year, month) pairs.
-    Works with Pydantic payloads (no payload.get).
-    Enforces YYYY year format.
-    Supports ZIP pairing if len(years)==len(months), else cartesian product.
+    Soft validator: returns (pairs, warnings).
 
     Behavior:
-    - If user selects one or more years and no months -> expands to all months for each year.
-      * Non-current years -> Jan..Dec.
-      * Current year -> Jan..<current month> (prevents future months by default).
-      Toggle below if you want all 12 months even for the current year.
+    - Months without years -> assume current year (drop future months; add ONLY future-month message).
+    - Both years & months provided -> ALWAYS cartesian product (no zip).
+    - Years only -> expand to all months (1..12, or 1..current_month for current year).
+    - Neither provided ->
+        1) If DB has data for the current month -> use (current_year, current_month)
+        2) Else, use the latest available month within the last 12 months window up to current month (single pair)
+        3) Else, use the absolute latest available month in DB (single pair)
+        4) Else, use (current_year, current_month)
+    - Only future-month messages are appended. All other fallbacks are SILENT (no messages).
     """
     payload_dict = _payload_to_dict(payload)
-
     today = date.today()
+    warnings: List[str] = []
 
+   
     years = _coerce_int_list(payload_dict.get("years", []) or [], "years", four_digit_year=True)
     months = _coerce_int_list(payload_dict.get("months", []) or [], "months")
 
     years = [y for y in years if y != 0]
     months = [m for m in months if m != 0]
 
-    if months and not years:
-        raise HTTPException(status_code=400, detail="Year is mandatory when month is selected.")
+    months = [m for m in months if 1 <= m <= 12]
 
-    bad_months = [m for m in months if m < 1 or m > 12]
-    if bad_months:
-        raise HTTPException(status_code=400, detail=f"Invalid month(s): {bad_months}. Months must be 1-12.")
+
+    if months and not years:
+        future_months = sorted({m for m in months if m > today.month})
+        if future_months:
+            warnings.append(f"future month(s) for {today.year}: {future_months}")
+        months = [m for m in months if m <= today.month]
+        if not months:
+            pairs, warnings = _fallback_pairs_for_empty_selection(today, db, warnings, silent=True)
+            return pairs, warnings
+
+        pairs = sorted({(today.year, m) for m in months})
+        return pairs, warnings
 
     if years:
-        future_years = [y for y in years if y > today.year]
-        if future_years:
-            raise HTTPException(status_code=400, detail=f"Future year(s) not allowed: {sorted(set(future_years))}")
+       
+        years = [y for y in years if y <= today.year]
+        if not years:
+            pairs, warnings = _fallback_pairs_for_empty_selection(today, db, warnings, silent=True)
+            return pairs, warnings
 
-        years_ordered = list(years)
+        years_ordered = list(dict.fromkeys(years))  
 
         if not months:
-            pairs: List[Tuple[int, int]] = []
+            pairs2: List[Tuple[int, int]] = []
             for y in years_ordered:
-               
                 max_month = today.month if y == today.year else 12
-               
                 for m in range(1, max_month + 1):
-                    pairs.append((y, m))
-            return sorted(set(pairs))
+                    pairs2.append((y, m))
+            pairs2 = sorted(set(pairs2))
+            return pairs2, warnings
 
-
-        if len(months) == len(years_ordered):
-            pairs: List[Tuple[int, int]] = []
-            for y, m in zip(years_ordered, months):
-                if y == today.year and m > today.month:
-                    raise HTTPException(status_code=400, detail=f"Future month {m} not allowed for {today.year}.")
-                pairs.append((y, m))
-            return sorted(set(pairs))
-
-      
-        pairs2: List[Tuple[int, int]] = []
-        for y in sorted(set(years_ordered)):
+       
+        pairs3: List[Tuple[int, int]] = []
+        for y in years_ordered:
             max_month = today.month if y == today.year else 12
-            future_months = [m for m in months if m > max_month]
-            if future_months:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Future month(s) not allowed for {y}: {sorted(set(future_months))}"
-                )
-            for m in months:
-                pairs2.append((y, m))
-        return sorted(set(pairs2))
+            bad_for_year = sorted({m for m in months if m > max_month})
+            if bad_for_year:
+                warnings.append(f"future month(s) for {y}: {bad_for_year}")
+            allowed_for_year = [m for m in months if m <= max_month]
+            for m in allowed_for_year:
+                pairs3.append((y, m))
 
+        if not pairs3:
+            pairs, warnings = _fallback_pairs_for_empty_selection(today, db, warnings, silent=True)
+            return pairs, warnings
+
+        pairs3 = sorted(set(pairs3))
+        return pairs3, warnings
+
+    pairs, warnings = _fallback_pairs_for_empty_selection(today, db, warnings, silent=True)
+    return pairs, warnings
+
+
+def _fallback_pairs_for_empty_selection(
+    today: date, db: Optional[Session], warnings: List[str], silent: bool = True
+) -> Tuple[List[Tuple[int, int]], List[str]]:
+    """
+    Fallback when no explicit valid selection remains.
+    Preference:
+      1) If DB has data for current month -> (today.year, today.month)
+      2) Else latest available month within the last 12 months window (ending at current month)
+      3) Else absolute latest available month in DB
+      4) Else (today.year, today.month)
+
+    Always returns exactly ONE (year, month) pair.
+    """
    
-    if db:
-        latest = db.query(func.max(ShiftAllowances.duration_month)).scalar()
-        if latest:
-            current_exists = (
-                db.query(func.count(ShiftAllowances.id))
-                .filter(extract("year", ShiftAllowances.duration_month) == today.year)
-                .filter(extract("month", ShiftAllowances.duration_month) == today.month)
-                .scalar()
-            )
-            if current_exists and int(current_exists) > 0:
-                return [(today.year, today.month)]
-            return _last_n_month_pairs(latest.year, latest.month, n=12)
+    if not db or ShiftAllowances is None:
+        return ([(today.year, today.month)], warnings)
 
-    return [(today.year, today.month)]
+    try:
+        current_exists = (
+            db.query(func.count(ShiftAllowances.id))
+              .filter(extract("year", ShiftAllowances.duration_month) == today.year)
+              .filter(extract("month", ShiftAllowances.duration_month) == today.month)
+              .scalar()
+        )
+    except Exception:
+        current_exists = 0
+
+    if current_exists and int(current_exists) > 0:
+        return ([(today.year, today.month)], warnings)
+
+    last_12_pairs = _last_n_month_pairs(today.year, today.month, n=12)
+
+    try:
+        window_filter = or_(*[
+            and_(
+                extract("year", ShiftAllowances.duration_month) == y,
+                extract("month", ShiftAllowances.duration_month) == m,
+            )
+            for (y, m) in last_12_pairs
+        ])
+        latest_in_window = (
+            db.query(func.max(ShiftAllowances.duration_month))
+              .filter(window_filter)
+              .scalar()
+        )
+    except Exception:
+        latest_in_window = None
+
+    if latest_in_window:
+        return ([(latest_in_window.year, latest_in_window.month)], warnings)
+
+
+    try:
+        absolute_latest = db.query(func.max(ShiftAllowances.duration_month)).scalar()
+    except Exception:
+        absolute_latest = None
+
+    if absolute_latest:
+        return ([(absolute_latest.year, absolute_latest.month)], warnings)
+
+ 
+    return ([(today.year, today.month)], warnings)
+
+
+def validate_years_months(payload: Any, db: Session = None) -> List[Tuple[int, int]]:
+    pairs, _ = validate_years_months_with_warnings(payload, db=db)
+    return pairs
 
 
 def get_previous_month_allowance(db: Session, base_filters, year: int, month: int) -> float:
+    if ShiftAllowances is None or ShiftMapping is None or ShiftsAmount is None:
+        return 0.0
+
     py, pm = _previous_year_month(year, month)
     ShiftsAmountAlias = aliased(ShiftsAmount)
     allowance_expr = func.coalesce(ShiftMapping.days, 0) * func.coalesce(ShiftsAmountAlias.amount, 0)
@@ -881,7 +946,7 @@ def get_previous_month_allowance(db: Session, base_filters, year: int, month: in
         .outerjoin(
             ShiftsAmountAlias,
             (extract("year", ShiftAllowances.duration_month) == cast(ShiftsAmountAlias.payroll_year, Integer))
-            & (func.upper(func.trim(ShiftMapping.shift_type)) == func.upper(func.trim(ShiftsAmountAlias.shift_type)))
+            & (func.upper(func.trim(ShiftMapping.shift_type)) == func.upper(func.trim(ShiftsAmountAlias.shift_type))),
         )
         .filter(*base_filters)
         .filter(extract("year", ShiftAllowances.duration_month) == py)
@@ -892,6 +957,8 @@ def get_previous_month_allowance(db: Session, base_filters, year: int, month: in
 
 
 def get_previous_month_unique_clients(db: Session, base_filters, year: int, month: int) -> int:
+    if ShiftAllowances is None:
+        return 0
     py, pm = _previous_year_month(year, month)
     count_ = (
         db.query(func.count(func.distinct(ShiftAllowances.client)))
@@ -904,6 +971,8 @@ def get_previous_month_unique_clients(db: Session, base_filters, year: int, mont
 
 
 def get_previous_month_unique_departments(db: Session, base_filters, year: int, month: int) -> int:
+    if ShiftAllowances is None:
+        return 0
     py, pm = _previous_year_month(year, month)
     count_ = (
         db.query(func.count(func.distinct(ShiftAllowances.department)))
@@ -916,6 +985,8 @@ def get_previous_month_unique_departments(db: Session, base_filters, year: int, 
 
 
 def get_previous_month_unique_employees(db: Session, base_filters, year: int, month: int) -> int:
+    if ShiftAllowances is None:
+        return 0
     py, pm = _previous_year_month(year, month)
     count_ = (
         db.query(func.count(func.distinct(ShiftAllowances.emp_id)))
@@ -926,14 +997,20 @@ def get_previous_month_unique_employees(db: Session, base_filters, year: int, mo
     )
     return int(count_ or 0)
 
-
 def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
     """
     Dashboard summary with sorting + fixed payload handling.
     sort_by: client | client_partner | departments | headcount | total_allowance
     sort_order: default | asc | desc
     default => no sorting
+
+    Returns only:
+      - summary (including selected_periods)
+      - messages (only future-month messages)
     """
+    if ShiftAllowances is None or ShiftMapping is None or ShiftsAmount is None:
+        return {"summary": {"selected_periods": []}, "messages": []}
+
  
     validate_shifts(payload)
     validate_headcounts(payload)
@@ -956,11 +1033,24 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
             func.lower(func.trim(ShiftAllowances.department)).in_([d.lower() for d in depts_list])
         )
 
-    pairs = sorted(set(validate_years_months(payload, db=db) or []))
+    pairs, messages = validate_years_months_with_warnings(payload, db=db)
+    pairs = sorted(set(pairs))
+
+   
+    selected_periods: List[Dict[str, Any]] = []
+    if pairs:
+        grouped: Dict[int, List[int]] = defaultdict(list)
+        for y, m in pairs:
+            grouped[y].append(m)
+        for y in sorted(grouped.keys()):
+            months_sorted_unique = sorted(set(grouped[y]))
+            selected_periods.append({"year": y, "months": months_sorted_unique})
+
     if not pairs:
+        
         return {
-            "summary": {},
-            "dashboard": {"clients": {}, "client_partner": {}, "total_allowance": 0.0, "head_count": 0}
+            "summary": {"selected_periods": []},
+            "messages": messages,
         }
 
     selected_shifts = parse_shifts(payload_dict.get("shifts", None))
@@ -971,12 +1061,11 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
     yr_month_filters = [
         and_(
             extract("year", ShiftAllowances.duration_month) == y,
-            extract("month", ShiftAllowances.duration_month) == m
+            extract("month", ShiftAllowances.duration_month) == m,
         )
         for y, m in pairs
     ]
 
- 
     def build_employee_limit_subquery(limit_n: int):
         if not limit_n:
             return None
@@ -993,7 +1082,7 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
             .outerjoin(
                 ShiftsAmountAlias,
                 (extract("year", ShiftAllowances.duration_month) == cast(ShiftsAmountAlias.payroll_year, Integer))
-                & (func.upper(func.trim(ShiftMapping.shift_type)) == func.upper(func.trim(ShiftsAmountAlias.shift_type)))
+                & (func.upper(func.trim(ShiftMapping.shift_type)) == func.upper(func.trim(ShiftsAmountAlias.shift_type))),
             )
             .filter(*base_filters)
             .filter(or_(*yr_month_filters))
@@ -1026,7 +1115,7 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
         .outerjoin(
             ShiftsAmountAlias,
             (extract("year", ShiftAllowances.duration_month) == cast(ShiftsAmountAlias.payroll_year, Integer))
-            & (func.upper(func.trim(ShiftMapping.shift_type)) == func.upper(func.trim(ShiftsAmountAlias.shift_type)))
+            & (func.upper(func.trim(ShiftMapping.shift_type)) == func.upper(func.trim(ShiftsAmountAlias.shift_type))),
         )
         .filter(*base_filters)
         .filter(or_(*yr_month_filters))
@@ -1037,18 +1126,19 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
 
     rows = rows_q.all()
     if not rows:
+       
         return {
-            "summary": {},
-            "dashboard": {"clients": {}, "client_partner": {}, "total_allowance": 0.0, "head_count": 0}
+            "summary": {"selected_periods": selected_periods},
+            "messages": messages,
         }
 
+    
     def empty_node() -> Dict[str, Any]:
         base = {
             "total_allowance": 0.0,
             "head_count": set(),  
-            "dept_set": set(),    
+            "dept_set": set(),
         }
-        
         for s in SHIFT_TYPES:
             base[s] = {"total": 0.0, "head_count": set()}
         return base
@@ -1066,13 +1156,11 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
 
     for emp, client, dept, cp, shift, days, amt in rows:
         shift = clean_str(shift).upper()
-       
         if SHIFT_TYPES and shift not in SHIFT_TYPES:
             continue
         if selected_shifts and shift not in selected_shifts:
             continue
 
-        
         if shift:
             seen_shifts.add(shift)
 
@@ -1090,7 +1178,7 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
         clients_set.add(client)
         depts_set.add(dept)
 
-       
+   
         c = dashboard["clients"].setdefault(client, empty_node())
         c["total_allowance"] += allowance
         if eid:
@@ -1102,7 +1190,7 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
         if eid:
             c[shift]["head_count"].add(eid)
 
-      
+ 
         a = dashboard["client_partner"].setdefault(cp_name, empty_node())
         a["total_allowance"] += allowance
         if eid:
@@ -1114,7 +1202,7 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
         if eid:
             a[shift]["head_count"].add(eid)
 
-        
+   
         a_client = a.setdefault("clients", {}).setdefault(client, empty_node())
         a_client["total_allowance"] += allowance
         if eid:
@@ -1126,7 +1214,13 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
         if eid:
             a_client[shift]["head_count"].add(eid)
 
-    def finalize(node: Dict[str, Any], all_shift_keys: Set[str], *, add_shift_buckets: bool = True, add_departments: bool = True) -> None:
+    def finalize(
+        node: Dict[str, Any],
+        all_shift_keys: Set[str],
+        *,
+        add_shift_buckets: bool = True,
+        add_departments: bool = True,
+    ) -> None:
         if "head_count_set" in node:
             node["head_count"] = len(node.pop("head_count_set"))
         else:
@@ -1142,11 +1236,10 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
             for s in shifts_to_finalize:
                 if s not in node:
                     node[s] = {"total": 0.0, "head_count": set()}
-                hc = node[s].get("head_count", set())
-                node[s]["head_count"] = len(hc) if isinstance(hc, set) else int(hc or 0)
+                hc2 = node[s].get("head_count", set())
+                node[s]["head_count"] = len(hc2) if isinstance(hc2, set) else int(hc2 or 0)
                 node[s]["total"] = float(node[s].get("total", 0.0) or 0.0)
 
-    
     for cnode in dashboard["clients"].values():
         finalize(cnode, seen_shifts, add_shift_buckets=True, add_departments=True)
     for pnode in dashboard["client_partner"].values():
@@ -1154,22 +1247,8 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
         for cnode in pnode.get("clients", {}).values():
             finalize(cnode, seen_shifts, add_shift_buckets=True, add_departments=True)
 
+  
     finalize(dashboard, seen_shifts, add_shift_buckets=False, add_departments=False)
-   
-   
-    if sort_order != "default" and sort_by:
-        dashboard["clients"] = apply_sort_dict_dashboard(dashboard["clients"], sort_by, sort_order)
-        dashboard["client_partner"] = apply_sort_dict_dashboard(dashboard["client_partner"], sort_by, sort_order)
-        for _, pnode in dashboard["client_partner"].items():
-            if "clients" in pnode:
-                pnode["clients"] = apply_sort_dict_dashboard(pnode["clients"], sort_by, sort_order)
-
-   
-    top = payload_dict.get("top", "ALL")
-    if top != "ALL" and str(top).isdigit():
-        top_n = int(top)
-        dashboard["clients"] = dict(list(dashboard["clients"].items())[:top_n])
-        dashboard["client_partner"] = dict(list(dashboard["client_partner"].items())[:top_n])
 
     
     latest_y, latest_m = pairs[-1]
@@ -1198,24 +1277,20 @@ def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
     dashboard["total_allowance"] = round(total_allowance, 2)
 
     summary = {
+        "selected_periods": selected_periods,  
         "total_clients": len(clients_set),
         "total_clients_last_month": calc_change(len(clients_set), previous_clients_count),
-
         "total_departments": len(depts_set),
         "total_departments_last_month": calc_change(len(depts_set), previous_departments_count),
-
         "head_count": dashboard["head_count"],
         "head_count_last_month": calc_change(dashboard["head_count"], previous_head_count),
-
         "total_allowance": round(total_allowance, 2),
         "total_allowance_last_month": calc_change(round(total_allowance, 2), previous_total),
-
         "previous_month_allowance": previous_total,
         "previous_month_allowance_last_month": calc_change(previous_total, prev_prev_total),
     }
 
-    return {"summary": summary, "dashboard": dashboard}
-
+    return {"summary": summary, "messages": messages}
 
 try:
     from utils.shift_config import get_all_shift_keys 
@@ -1498,81 +1573,76 @@ def _find_recent_month_with_data(
             m -= 1
     return None
 
+def validate_years_months(payload: dict, db: Session) -> Tuple[List[Tuple[int, int]], Optional[str]]:
+    """
+    Behavior:
+    - If no year/month → use current month
+    - If current month has no data → fallback to latest available month
+    - If only month provided → use current year
+    - Ignore future periods and return message
+    """
 
-def validate_years_months(payload: dict, db: Session) -> List[Tuple[int, int]]:
-    """
-    REQUIRED BEHAVIOR (FINAL – Option A):
-      • If NO year AND NO month selected:
-            1) Try CURRENT (year, month)
-            2) If not available, scan backward up to 12 months and return the first (most recent) month that has data
-            3) If none found in last 12 months, return current (year, month)
-      • If ONLY months selected -> assume CURRENT year (block future months)
-      • If ONLY years selected -> expand to all valid months (block future months for current year; block future years)
-      • If both provided -> cartesian pairing with future prevention
-      • Always block future years, and for current year block future months
-    """
     today = date.today()
     cy, cm = today.year, today.month
 
     payload = _payload_to_plain_dict(payload)
-    years_raw = _as_list(payload.get("years"))
-    months_raw = _as_list(payload.get("months"))
 
-    
-    if years_raw in ([], [0]):
+    years_raw = payload.get("years")
+    months_raw = payload.get("months")
+
+    # Treat ALL / "" / None as not provided
+    if _is_all(years_raw) or years_raw in ("", None):
         years_raw = None
-    if months_raw in ([], [0]):
+    if _is_all(months_raw) or months_raw in ("", None):
         months_raw = None
 
-    years = _coerce_int_list(years_raw or [], "years", four_digit_year=True)
-    months = _coerce_int_list(months_raw or [], "months")
+    years = _coerce_int_list(_as_list(years_raw), "years", four_digit_year=True) if years_raw else []
+    months = _coerce_int_list(_as_list(months_raw), "months") if months_raw else []
 
-    years = [y for y in years if y != 0]
-    months = [m for m in months if m != 0]
+    pairs: List[Tuple[int, int]] = []
 
     if not years and not months:
-        found = _find_recent_month_with_data(db, cy, cm, lookback=12)
-        if found:
-            fy, fm = found
-            return [(fy, fm)]
-        
-        return [(cy, cm)]
+        pairs = [(cy, cm)]
 
-   
-    bad_months = [m for m in months if m < 1 or m > 12]
-    if bad_months:
-        raise HTTPException(400, f"Invalid month(s): {sorted(set(bad_months))}. Months must be 1-12.")
-
-    
-    if months and not years:
-        future = [m for m in months if m > cm]
-        if future:
-            raise HTTPException(400, f"Future month(s) not allowed for current year: {sorted(set(future))}")
-        return sorted({(cy, m) for m in months})
-
-    
-    future_years = [y for y in years if y > cy]
-    if future_years:
-        raise HTTPException(400, f"Future year(s) not allowed: {sorted(set(future_years))}")
-
-    if years and not months:
-        out: List[Tuple[int, int]] = []
+    elif years and months:
         for y in years:
-            max_m = cm if y == cy else 12
-            out.extend((y, m) for m in range(1, max_m + 1))
-        return sorted(set(out))
+            for m in months:
+                pairs.append((y, m))
 
-   
-    pairs: List[Tuple[int, int]] = []
-    for y in years:
-        max_m = cm if y == cy else 12
-        future_ms = [m for m in months if m > max_m]
-        if future_ms:
-            raise HTTPException(400, f"Future month(s) not allowed for {y}: {sorted(set(future_ms))}")
+    elif years:
+        for y in years:
+            for m in range(1, 13):
+                pairs.append((y, m))
+
+    
+    elif months:
         for m in months:
-            pairs.append((y, m))
+            pairs.append((cy, m))  
 
-    return sorted(set(pairs))
+    valid_pairs = []
+    future_pairs = []
+
+    for y, m in pairs:
+        if y > cy or (y == cy and m > cm):
+            future_pairs.append(f"{y}-{m:02d}")
+        else:
+            valid_pairs.append((y, m))
+
+    message = None
+    if future_pairs:
+        message = f"Future periods ignored: {', '.join(sorted(set(future_pairs)))}"
+
+    
+    if not valid_pairs:
+        latest = db.query(
+            extract("year", ShiftAllowances.duration_month).label("yy"),
+            extract("month", ShiftAllowances.duration_month).label("mm"),
+        ).order_by(ShiftAllowances.duration_month.desc()).first()
+
+        if latest:
+            valid_pairs = [(int(latest.yy), int(latest.mm))]
+
+    return sorted(set(valid_pairs)), message
 
 
 
@@ -1724,7 +1794,8 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
     sort_order = parse_sort_order(payload.get("sort_order", "default"))
 
    
-    pairs = validate_years_months(payload, db=db)
+    pairs, period_message = validate_years_months(payload, db=db)
+
     periods = [f"{y:04d}-{m:02d}" for y, m in pairs]
 
   
@@ -1886,6 +1957,7 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
 
     result: Dict[str, Any] = {
         "periods": periods,
+        "message": period_message,
         "summary": {
             "total_clients": len(clients_out),
             "departments": len(overall_depts),

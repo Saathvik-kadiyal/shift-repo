@@ -127,3 +127,50 @@ class ClientAnalyticsRequest(BaseModel):
 
     class Config:
         extra = "forbid"
+
+
+class ClientTotalAllowanceFilter(BaseModel):
+    clients: Union[str, List[str]] = "ALL"
+    departments: Union[str, List[str]] = "ALL"
+    years: List[int] = [0]
+    months: List[int] = [0]
+    headcounts: Union[str, List[str]] = "ALL"
+    shifts: Union[str, List[str]] = "ALL"
+    top: str = "ALL"
+
+    sort_by: Literal["total_allowance", "client"] = "total_allowance"
+    sort_order: Literal["asc", "desc", "default"] = "default"
+
+class SelectedPeriod(BaseModel):
+    year: int
+    months: List[int]
+
+
+class DashboardSummary(BaseModel):
+    selected_periods: List[SelectedPeriod]
+
+
+class ClientStats(BaseModel):
+    departments: int
+    headcount: int
+    total_allowance: float
+
+
+class DashboardResponse(BaseModel):
+    summary: DashboardSummary
+    messages: List[str] = []
+    dashboard: Dict[str, ClientStats]
+
+
+class DashboardFilter(BaseModel):
+    clients: Union[str, List[str]] = "ALL"
+    departments: Union[str, List[str]] = "ALL"
+    years: List[int] = [0]
+    months: List[int] = [0]
+    headcounts: Union[str, List[str]] = "ALL"   
+    shifts: Union[str, List[str]] = "ALL"
+    top: str = "ALL"
+
+    sort_by: Literal["total_allowance", "client"] = "total_allowance"
+    sort_order: Literal["asc", "desc", "default"] = "default"
+

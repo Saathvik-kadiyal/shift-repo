@@ -1,14 +1,17 @@
 """Services for client comparison, totals, and department summaries."""
 
-from datetime import datetime, date
+from datetime import datetime, date,timedelta
 from calendar import monthrange
-from typing import Optional, Dict, Any
-from decimal import Decimal
+from typing import Optional, Dict, Any, Union,List,Tuple,Set
+from decimal import Decimal,InvalidOperation
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from dateutil.relativedelta import relativedelta
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
+from utils.shift_config import get_all_shift_keys
+from schemas.dashboardschema import ClientTotalAllowanceFilter
+from collections import OrderedDict
 
 def parse_yyyy_mm(value: str) -> date:
     try:
@@ -289,113 +292,245 @@ def client_comparison_service(
 
     return final_result
 
+def _safe_int(v, default=None) -> Optional[int]:
+    if v is None:
+        return default
+    try:
+        return int(Decimal(str(v)))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
 
-def get_client_total_allowances(db: Session, start_month: str | None, end_month: str | None, top: str | None):
+
+def _normalize_years(years: List[int]) -> List[int]:
+    seen, result = set(), []
+    for y in years or []:
+        yi = _safe_int(y)
+        if yi is not None and yi not in seen:
+            seen.add(yi)
+            result.append(yi)
+    return result
 
 
-    if top is None or str(top).strip().lower() == "all":
-        top_int = None
-    else:
-        if not str(top).isdigit():
-            raise HTTPException(status_code=400, detail="top must be a positive integer or 'all'")
-        top_int = int(top)
-        if top_int <= 0:
-            raise HTTPException(status_code=400, detail="top must be greater than 0")
+def _normalize_months(months: List[int]) -> List[int]:
+    seen, result = set(), []
+    for m in months or []:
+        mi = _safe_int(m)
+        if mi is not None and 1 <= mi <= 12 and mi not in seen:
+            seen.add(mi)
+            result.append(mi)
+    return result
 
-    def validate_month(m: str):
-        try:
-            datetime.strptime(m, "%Y-%m")
-            return True
-        except ValueError:
-            return False
 
-    def generate_months(start_m: str, end_m: str):
-        result = []
-        cur = datetime.strptime(start_m, "%Y-%m")
-        end = datetime.strptime(end_m, "%Y-%m")
-        while cur <= end:
-            result.append(cur.strftime("%Y-%m"))
-            cur += relativedelta(months=1)
-        return result
 
-    if end_month and not start_month:
-        raise HTTPException(
-            status_code=400,
-            detail="start_month is required when end_month is provided"
-        )
+def _parse_headcount_filter(filter_value):
 
-    if not start_month and not end_month:
-        check_month = datetime.now().strftime("%Y-%m")
-        months = []
-        for _ in range(12):
-            exists = (
-                db.query(ShiftAllowances)
-                .filter(func.to_char(ShiftAllowances.duration_month, 'YYYY-MM') == check_month)
+    if filter_value in (None, "ALL", [0]):
+        return None
+
+    rules = []
+    values = filter_value if isinstance(filter_value, list) else [filter_value]
+
+    for item in values:
+        s = str(item).strip()
+
+        if "-" in s:
+            parts = s.split("-")
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                raise HTTPException(
+                    400,
+                    f"Invalid headcount range: {item}. Use format like 1-10."
+                )
+
+            start, end = int(parts[0]), int(parts[1])
+            if start > end:
+                raise HTTPException(
+                    400,
+                    f"Invalid headcount range (start > end): {item}"
+                )
+
+            rules.append(("range", start, end))
+
+        elif s.isdigit():
+            rules.append(("eq", int(s)))
+
+        else:
+            raise HTTPException(
+                400,
+                f"Invalid headcount format: {item}. Use 5 or 1-10."
+            )
+
+    return rules
+
+
+def _headcount_matches(value: Optional[int], rules) -> bool:
+    if rules is None:
+        return True
+    if value is None:
+        return False
+
+    for rule in rules:
+        if rule[0] == "range":
+            _, start, end = rule
+            if start <= value <= end:
+                return True
+        elif rule[0] == "eq":
+            _, expected = rule
+            if value == expected:
+                return True
+    return False
+
+
+def get_client_total_allowances(db: Session, filters):
+
+    today = date.today()
+    current_year = today.year
+    current_month = today.month
+    messages: List[str] = []
+
+    
+    raw_years = filters.years or []
+    raw_months = filters.months or []
+
+    if raw_years == [0]:
+        raw_years = []
+
+    if raw_months == [0]:
+        raw_months = []
+
+    years = _normalize_years(raw_years)
+    months = _normalize_months(raw_months)
+
+    base_query = db.query(ShiftAllowances)
+
+    if filters.clients != "ALL":
+        if isinstance(filters.clients, list):
+            base_query = base_query.filter(
+                ShiftAllowances.client.in_(filters.clients)
+            )
+        else:
+            base_query = base_query.filter(
+                ShiftAllowances.client == filters.clients
+            )
+
+    if filters.departments != "ALL":
+        if isinstance(filters.departments, list):
+            base_query = base_query.filter(
+                ShiftAllowances.department.in_(filters.departments)
+            )
+        else:
+            base_query = base_query.filter(
+                ShiftAllowances.department == filters.departments
+            )
+
+    if not years and not months:
+
+  
+        current_exists = base_query.filter(
+            func.extract("year", ShiftAllowances.duration_month) == current_year,
+            func.extract("month", ShiftAllowances.duration_month) == current_month
+        ).first()
+
+        if current_exists:
+            years = [current_year]
+            months = [current_month]
+        else:
+           
+            cutoff = today.replace(day=1) - relativedelta(months=12)
+
+            latest = (
+                base_query
+                .filter(ShiftAllowances.duration_month >= cutoff)
+                .order_by(ShiftAllowances.duration_month.desc())
                 .first()
             )
-            if exists:
-                months.append(check_month)
 
-            check_month = (
-                datetime.strptime(check_month, "%Y-%m") - relativedelta(months=1)
-            ).strftime("%Y-%m")
+            if latest and latest.duration_month:
+                latest_date = latest.duration_month
+                years = [latest_date.year]
+                months = [latest_date.month]
 
-        if not months:
-            return [{"message": "No data found for last 12 months"}]
+                messages.append(
+                    f"No data for current month. "
+                    f"Showing latest available month: "
+                    f"{latest_date.month}-{latest_date.year}"
+                )
+            else:
+             
+                years = [current_year]
+                months = [current_month]
 
-    elif start_month and not end_month:
-        if not validate_month(start_month):
-            raise HTTPException(status_code=400, detail="start_month must be in YYYY-MM format")
-        months = [start_month]
+   
+    elif months and not years:
+        years = [current_year]
 
-    else:
-        if not validate_month(start_month):
-            raise HTTPException(status_code=400, detail="start_month must be in YYYY-MM format")
+    elif years and not months:
+        months = list(range(1, 13))
 
-        if not validate_month(end_month):
-            raise HTTPException(status_code=400, detail="end_month must be in YYYY-MM format")
 
-        if end_month < start_month:
-            raise HTTPException(status_code=400, detail="end_month must be >= start_month")
 
-        months = generate_months(start_month, end_month)
-
-    rate_rows = db.query(ShiftsAmount).all()
-    rates = {r.shift_type.upper(): Decimal(r.amount) for r in rate_rows}
-
-    summary = {}
-
-    for month in months:
-        rows = (
-            db.query(ShiftAllowances)
-            .filter(func.to_char(ShiftAllowances.duration_month, 'YYYY-MM') == month)
-            .all()
-        )
-        for row in rows:
-            client = row.client or "Unknown"
-            if client not in summary:
-                summary[client] = Decimal(0)
-
-            for mapping in row.shift_mappings:
-                stype = mapping.shift_type.upper()
-                days = Decimal(mapping.days or 0)
-                summary[client] += days * rates.get(stype, Decimal(0))
-
-    if not summary:
-        raise HTTPException(
-            status_code=404,
-            detail="No shift allowance data found for the selected month(s)"
-        )
-    result = sorted(
-        [{"client": c, "total_allowances": float(v)} for c, v in summary.items()],
-        key=lambda x: x["total_allowances"],
-        reverse=True
+    q = base_query.filter(
+        func.extract("year", ShiftAllowances.duration_month).in_(years)
+    ).filter(
+        func.extract("month", ShiftAllowances.duration_month).in_(months)
     )
 
-    if top_int is not None:
-        result = result[:top_int]
+    rows = q.all()
 
-    return result
+
+
+    rate_rows = db.query(ShiftsAmount).all()
+    rates = {
+        str(r.shift_type).upper(): Decimal(r.amount)
+        for r in rate_rows
+    }
+
+    summary: Dict[str, Decimal] = {}
+    employees_by_client: Dict[str, Set[str]] = {}
+
+   
+    for row in rows:
+
+        client = row.client or "Unknown"
+
+        summary.setdefault(client, Decimal(0))
+        employees_by_client.setdefault(client, set())
+
+        if row.emp_id:
+            employees_by_client[client].add(str(row.emp_id))
+
+        for mapping in getattr(row, "shift_mappings", []):
+
+            shift_key = str(mapping.shift_type).upper()
+            days = Decimal(mapping.days or 0)
+            rate = rates.get(shift_key, Decimal(0))
+
+            summary[client] += days * rate
+
+    
+
+    result = []
+
+    for client, total in summary.items():
+        result.append({
+            "client": client,
+            "total_allowance": float(total)
+        })
+
+    result.sort(key=lambda x: x["total_allowance"], reverse=True)
+
+    if filters.top and str(filters.top).isdigit():
+        result = result[:int(filters.top)]
+
+    if not result and not messages:
+        messages.append("No data found for selected periods.")
+
+    return {
+        "selected_periods": [
+            {"year": y, "months": months} for y in years
+        ],
+        "messages": messages,
+        "data": result
+    }
 
 
 def get_client_departments_service(db: Session, client: str | None):
@@ -465,3 +600,380 @@ def get_client_departments_service(db: Session, client: str | None):
         }
         for c in sorted(result.keys())
     ]
+
+
+try:
+    from utils.shift_config import get_all_shift_keys
+except Exception:
+    def get_all_shift_keys() -> List[str]:
+        return []
+
+def _safe_int(v, default=None) -> Optional[int]:
+    if v is None:
+        return default
+    try:
+        return int(Decimal(str(v)))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def _normalize_months(months: List[int]) -> List[int]:
+    out = []
+    for m in months or []:
+        mi = _safe_int(m, None)
+        if mi is not None and 1 <= mi <= 12:
+            out.append(mi)
+
+    seen, res = set(), []
+    for m in out:
+        if m not in seen:
+            seen.add(m)
+            res.append(m)
+    return res
+
+
+def _normalize_years(years: List[int]) -> List[int]:
+    out = []
+    for y in years or []:
+        yi = _safe_int(y, None)
+        if yi is not None:
+            out.append(yi)
+
+    seen, res = set(), []
+    for y in out:
+        if y not in seen:
+            seen.add(y)
+            res.append(y)
+    return res
+
+
+def _year_month_tuple(d) -> Tuple[int, int]:
+    return (d.year, d.month)
+
+
+def _discover_available_pairs(db: Session, base_query) -> List[Tuple[int, int]]:
+    pq = base_query.with_entities(ShiftAllowances.duration_month).distinct()
+    rows = pq.all()
+    return sorted(
+        {_year_month_tuple(r[0]) for r in rows if r[0] is not None},
+        key=lambda t: (t[0], t[1])
+    )
+
+
+def _group_selected_periods(years: List[int], months: List[int]) -> List[Dict[str, Any]]:
+    months_norm = sorted(set(_normalize_months(months)))
+    grouped = []
+    for y in _normalize_years(years):
+        grouped.append({
+            "year": y,
+            "months": months_norm[:] if months_norm else list(range(1, 13))
+        })
+    return grouped
+
+
+def _parse_headcount_filter(filter_value: Union[str, List[str]]):
+    if filter_value in (None, "ALL", [0]):
+        return None
+
+    rules = []
+    values = filter_value if isinstance(filter_value, list) else [filter_value]
+
+    for item in values:
+        s = str(item).strip()
+
+        if s.endswith("+") and s[:-1].isdigit():
+            rules.append(("range", int(s[:-1]), 10**9))
+        elif "-" in s:
+            a, b = s.split("-", 1)
+            if a.strip().isdigit() and b.strip().isdigit():
+                start, end = int(a), int(b)
+                if start <= end:
+                    rules.append(("range", start, end))
+        elif s.isdigit():
+            rules.append(("eq", int(s)))
+
+    return rules or None
+
+
+def _headcount_matches(value: Optional[int], rules) -> bool:
+    if rules is None:
+        return True
+    if value is None:
+        return False
+
+    for rule in rules:
+        if rule[0] == "range":
+            _, start, end = rule
+            if start <= value <= end:
+                return True
+        elif rule[0] == "eq":
+            _, expected = rule
+            if value == expected:
+                return True
+    return False
+
+def _resolve_periods_and_messages(db: Session, base_query, filters, today: date):
+
+    messages: List[str] = []
+    current_year, current_month = today.year, today.month
+
+    raw_years = filters.years or []
+    raw_months = filters.months or []
+
+    if raw_years == [0]:
+        raw_years = []
+
+    if raw_months == [0]:
+        raw_months = []
+
+    years = _normalize_years(raw_years)
+    months = _normalize_months(raw_months)
+
+   
+    if not years and not months:
+
+ 
+        current_exists = base_query.filter(
+            func.extract("year", ShiftAllowances.duration_month) == current_year,
+            func.extract("month", ShiftAllowances.duration_month) == current_month
+        ).first()
+
+        if current_exists:
+            years = [current_year]
+            months = [current_month]
+        else:
+            
+            cutoff = today.replace(day=1) - relativedelta(months=12)
+
+            latest_row = (
+                base_query
+                .filter(ShiftAllowances.duration_month >= cutoff)
+                .order_by(ShiftAllowances.duration_month.desc())
+                .first()
+            )
+
+            if latest_row and latest_row.duration_month:
+                latest_date = latest_row.duration_month
+                years = [latest_date.year]
+                months = [latest_date.month]
+
+                messages.append(
+                    f"No data for current month. "
+                    f"Showing latest available month: "
+                    f"{latest_date.month}-{latest_date.year}"
+                )
+            else:
+           
+                years = [current_year]
+                months = [current_month]
+
+    elif months and not years:
+        years = [current_year]
+
+    elif years and not months:
+        months = list(range(1, 13))
+
+    
+    valid_months = []
+    for m in months:
+        for y in years:
+            if y == current_year and m > current_month:
+                continue
+            valid_months.append(m)
+
+    if not valid_months:
+        valid_months = months
+
+    return years, valid_months, messages
+
+def _extract_employee_id(row: ShiftAllowances) -> Optional[str]:
+    emp = getattr(row, "emp_id", None)
+    if emp:
+        return str(emp).strip()
+
+    name = str(getattr(row, "emp_name", "") or "").strip()
+    dept = str(getattr(row, "department", "") or "").strip()
+    client = str(getattr(row, "client", "") or "").strip()
+
+    if name or dept or client:
+        return f"{name}|{dept}|{client}"
+
+    return None
+
+
+
+def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
+
+    today = date.today()
+
+    if filters.years and filters.years != [0]:
+        for y in filters.years:
+            yi = _safe_int(y)
+            if yi is None or yi < 2000 or yi > today.year + 5:
+                raise HTTPException(400, f"Invalid year: {y}")
+
+    if filters.months and filters.months != [0]:
+        for m in filters.months:
+            mi = _safe_int(m)
+            if mi is None or mi < 1 or mi > 12:
+                raise HTTPException(400, f"Invalid month: {m}")
+
+  
+    VALID_SHIFTS = set(get_all_shift_keys())
+    if filters.shifts != "ALL":
+        shifts_to_check = (
+            filters.shifts if isinstance(filters.shifts, list)
+            else [filters.shifts]
+        )
+        for s in shifts_to_check:
+            shift_key = str(s).upper().strip()
+            if VALID_SHIFTS and shift_key not in VALID_SHIFTS:
+                raise HTTPException(400, f"Invalid shift type: {s}")
+
+   
+
+    if filters.headcounts not in (None, "ALL", [0]):
+
+        values = filters.headcounts if isinstance(filters.headcounts, list) else [filters.headcounts]
+
+        for item in values:
+            s = str(item).strip()
+
+            if "+" in s:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid headcount format: {item}. Use format like 1-10."
+                )
+
+            if "-" in s:
+                parts = s.split("-")
+                if (
+                    len(parts) != 2
+                    or not parts[0].isdigit()
+                    or not parts[1].isdigit()
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid headcount range: {item}. Use format like 1-10."
+                    )
+
+                if int(parts[0]) > int(parts[1]):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid headcount range (start > end): {item}"
+                    )
+
+            elif not s.isdigit():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid headcount format: {item}. Use 5 or 1-10."
+                )
+
+    if filters.top is None or str(filters.top).lower() == "all":
+        top_int = None
+    else:
+        if not str(filters.top).isdigit():
+            raise HTTPException(400, "top must be integer or ALL")
+        top_int = int(filters.top)
+        if top_int <= 0:
+            raise HTTPException(400, "top must be > 0")
+
+    rate_rows = db.query(ShiftsAmount).all()
+    rates = {str(r.shift_type).upper(): Decimal(r.amount) for r in rate_rows}
+
+    
+    q = db.query(ShiftAllowances)
+
+    if filters.clients != "ALL":
+        if isinstance(filters.clients, list):
+            q = q.filter(ShiftAllowances.client.in_(filters.clients))
+        else:
+            q = q.filter(ShiftAllowances.client == filters.clients)
+
+    if filters.departments != "ALL":
+        if isinstance(filters.departments, list):
+            q = q.filter(ShiftAllowances.department.in_(filters.departments))
+        else:
+            q = q.filter(ShiftAllowances.department == filters.departments)
+
+    years, months, messages = _resolve_periods_and_messages(db, q, filters, today)
+    selected_periods = _group_selected_periods(years, months)
+
+    q = q.filter(func.extract("year", ShiftAllowances.duration_month).in_(years))
+    q = q.filter(func.extract("month", ShiftAllowances.duration_month).in_(months))
+
+    rows = q.all()
+
+    hc_rules = _parse_headcount_filter(filters.headcounts)
+
+    selected_shifts = None
+    if filters.shifts != "ALL":
+        if isinstance(filters.shifts, list):
+            selected_shifts = {str(s).upper() for s in filters.shifts}
+        else:
+            selected_shifts = {str(filters.shifts).upper()}
+
+    employees_by_client: Dict[str, Set[str]] = {}
+    departments_by_client: Dict[str, Set[str]] = {}
+    allowances_by_client: Dict[str, Decimal] = {}
+
+    for row in rows:
+        client = row.client or "Unknown"
+        emp = _extract_employee_id(row)
+
+        employees_by_client.setdefault(client, set())
+        departments_by_client.setdefault(client, set())
+        allowances_by_client.setdefault(client, Decimal(0))
+
+        if emp:
+            employees_by_client[client].add(emp)
+
+        if row.department:
+            departments_by_client[client].add(row.department)
+
+        for mapping in getattr(row, "shift_mappings", []):
+            shift_key = str(mapping.shift_type).upper()
+            if selected_shifts and shift_key not in selected_shifts:
+                continue
+            if VALID_SHIFTS and shift_key not in VALID_SHIFTS:
+                continue
+
+            days = Decimal(mapping.days or 0)
+            rate = rates.get(shift_key, Decimal(0))
+            allowances_by_client[client] += days * rate
+
+    items = []
+
+    for client, total in allowances_by_client.items():
+        hc = len(employees_by_client.get(client, []))
+        if not _headcount_matches(hc, hc_rules):
+            continue
+
+        items.append({
+            "client": client,
+            "departments": len(departments_by_client.get(client, [])),
+            "headcount": hc,
+            "total_allowance": float(total),
+        })
+
+    items.sort(key=lambda x: x["total_allowance"], reverse=True)
+
+    if top_int:
+        items = items[:top_int]
+
+    dashboard = OrderedDict()
+    for it in items:
+        dashboard[it["client"]] = {
+            "departments": it["departments"],
+            "headcount": it["headcount"],
+            "total_allowance": it["total_allowance"],
+        }
+
+    if not dashboard and not messages:
+        messages.append("No data found for selected filters.")
+
+    return {
+        "summary": {"selected_periods": selected_periods},
+        "messages": messages,
+        "dashboard": dashboard
+    }
