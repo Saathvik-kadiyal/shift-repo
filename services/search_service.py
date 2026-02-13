@@ -414,14 +414,15 @@ def export_filtered_excel(
     _ = get_allowance_columns()  
 
     response = {
-        "total_records": total_unique,
-        "shift_details": {
-            **{k: v for k, v in overall_shift.items() if v > 0},
-            "headcount": total_unique,
-            "total_allowance": round(overall_total, 2),
-        },
-        "data": {"employees": employees_page}
-    }
+    "total_records": total_unique,
+    "shift_details": [
+        {k: v for k, v in overall_shift.items() if v > 0},
+        # {"headcount": total_unique},
+        {"total_allowance": round(overall_total, 2)},
+    ],
+    "data": {"employees": employees_page}
+}
+
     if messages:
         response["message"] = " ".join(messages)
     return response

@@ -635,74 +635,18 @@ def get_client_total_allowances(db: Session, filters):
         "messages": messages,
         "data": result
     }
-def get_client_departments_service(db: Session, client: str | None):
+def get_client_departments_service(db: Session):
 
-    if client is not None:
-        client = client.strip()
-
-        if not isinstance(client, str):
-            raise HTTPException(status_code=400, detail="Client name must be a string")
-
-        if client == "":
-            raise HTTPException(status_code=400, detail="Client name cannot be empty")
-
-        if client.isdigit():
-            raise HTTPException(status_code=400, detail="Numbers are not allowed, only strings")
-
-  
-    if client:
-        rows = (
-            db.query(ShiftAllowances.department)
-            .filter(
-                ShiftAllowances.client == client,
-                ShiftAllowances.client.isnot(None)
-            )
-            .all()
-        )
-
-        if not rows:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Client '{client}' not found"
-            )
-
-        departments = sorted({r[0] for r in rows if r[0]})
-
-        return [{
-            "client": client,
-            "departments": departments
-        }]
-
- 
     rows = (
-        db.query(
-            ShiftAllowances.client,
-            ShiftAllowances.department
-        )
-        .filter(ShiftAllowances.client.isnot(None))
+        db.query(ShiftAllowances.department)
+        .filter(ShiftAllowances.department.isnot(None))
+        .distinct()
         .all()
     )
 
-    result = {}
+    departments = sorted([r[0] for r in rows if r[0]])
 
-    for client_name, dept in rows:
-        if not client_name:
-            continue
-
-        result.setdefault(client_name, set())
-
-        if dept:
-            result[client_name].add(dept)
-
-
-    return [
-        {
-            "client": c,
-            "departments": sorted(result[c])
-        }
-        for c in sorted(result.keys())
-    ]
-
+    return departments
 
 try:
     from utils.shift_config import get_all_shift_keys
@@ -992,11 +936,28 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
         else:
             q = q.filter(ShiftAllowances.client == filters.clients)
 
-    if filters.departments != "ALL":
-        if isinstance(filters.departments, list):
-            q = q.filter(ShiftAllowances.department.in_(filters.departments))
-        else:
-            q = q.filter(ShiftAllowances.department == filters.departments)
+    from sqlalchemy import or_, func
+
+
+    if filters.client_starts_with:
+        prefix = filters.client_starts_with.strip().lower()
+        q = q.filter(
+        func.lower(func.trim(ShiftAllowances.client)).like(f"{prefix}%")
+    )
+
+
+    elif filters.clients != "ALL":
+        if isinstance(filters.clients, list):
+            q = q.filter(
+                func.lower(func.trim(ShiftAllowances.client)).in_(
+                    [c.strip().lower() for c in filters.clients]
+            )
+        )
+    else:
+        q = q.filter(
+            func.lower(func.trim(ShiftAllowances.client)) ==
+            filters.clients.strip().lower()
+        )
 
     years, months, messages = _resolve_periods_and_messages(db, q, filters, today)
     selected_periods = _group_selected_periods(years, months)

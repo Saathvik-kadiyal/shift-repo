@@ -1,56 +1,51 @@
-"""Routes for downloading client summary reports."""
- 
-from fastapi import APIRouter, Depends, Body
+"""Routes for client summary: JSON API + Excel download."""
+from fastapi import APIRouter, Depends, Body, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+
 from db import get_db
-from services.client_summary_download_service import client_summary_download_service
 from utils.dependencies import get_current_user
- 
-router = APIRouter(prefix="/client-summary")
- 
- 
+from services.client_summary_service import client_summary_service
+from services.client_summary_download_service import client_summary_download_service
+
+router = APIRouter(
+    prefix="/client-summary",
+    tags=["Client Summary"],
+)
 @router.post("/download")
 def download_client_summary_excel(
     payload: dict = Body(
         ...,
         example={
+            "years": [2025, 2026],
+            "months": [1, 2, 3],
             "clients": "ALL",
-            "emp_id": "IN01804611",
-            "client_partner": "John",
-            "start_month": "YYYY-MM",
-            "end_month": "YYYY-MM",
-            "selected_year": "YYYY",
-            "selected_months": ["01", "02"],
-            "selected_quarters": ["Q1"]
-        }
+            "departments": "ALL",
+            "emp_id": ["IN01804611"],
+            "client_partner": ["John Doe"],
+            "shifts": "ALL",
+            "headcounts": "1-10",
+            "sort_by": "total_allowance",
+            "sort_order": "desc",
+        },
     ),
     db: Session = Depends(get_db),
     _current_user=Depends(get_current_user),
 ):
     """
     Generate and download the client summary Excel report.
- 
-    Filters can include:
-    - emp_id: Specific employee ID
-    - client_partner: Client partner name
-    - clients: Single client or "ALL"
-    - start_month / end_month: Month range in YYYY-MM format
-    - selected_year, selected_months, selected_quarters: Additional date filters
- 
-    Delegates all logic to the service layer `client_summary_download_service`.
-   
+
+    Filters are passed to client_summary_service (via the download service).
     Returns a FileResponse with the generated Excel file.
     """
-    file_path = client_summary_download_service(db=db, payload=payload)
- 
-    return FileResponse(
-        path=file_path,
-        filename="client_summary.xlsx",
-        media_type=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-    )
- 
- 
+    try:
+        file_path = client_summary_download_service(db=db, payload=payload)
+        return FileResponse(
+            path=file_path,
+            filename="client_summary.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except HTTPException:
+        raise
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))

@@ -40,14 +40,14 @@ def client_total_allowances(
     """Return total allowances grouped by client with filters."""
     return get_client_total_allowances(db, filters)
 
+@router.get("/client-departments")
+def get_client_departments(
+    db: Session = Depends(get_db),
+    _current_user=Depends(get_current_user),
+):
+    """Return all unique departments."""
+    return get_client_departments_service(db)
 
-@router.get("/client-departments",
-            response_model=list[ClientDeptResponse])
-def get_client_departments(client: str | None = None,
-                           db: Session = Depends(get_db),
-                           _current_user=Depends(get_current_user)):
-    """Return department-wise data for a client."""
-    return get_client_departments_service(db, client)
 
 @router.post("/dashboard", response_model=DashboardResponse)
 def dashboard(

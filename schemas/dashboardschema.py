@@ -170,6 +170,7 @@ class DashboardFilter(BaseModel):
     headcounts: Union[str, List[str]] = "ALL"   
     shifts: Union[str, List[str]] = "ALL"
     top: str = "ALL"
+    client_starts_with: Optional[str] = None
 
     sort_by: Literal["total_allowance", "client"] = "total_allowance"
     sort_order: Literal["asc", "desc", "default"] = "default"
