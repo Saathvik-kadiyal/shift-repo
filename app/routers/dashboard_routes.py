@@ -52,7 +52,9 @@ def get_graph(
                              start_month,end_month)
 
 @router.get("/clients", response_model=ClientList)
-def get_clients(db: Session = Depends(get_db)):
+def get_clients(db: Session = Depends(get_db),
+                _current_user=Depends(get_current_user)
+):
     """Return list of all clients."""
     return get_all_clients_service(db)
 
@@ -82,7 +84,7 @@ def get_vertical_bar(
                                     end_month,top)
 
 
-@router.post("/client-allowance-summary")
+@router.post("/KPIS-summary")
 def client_dashboard_summary(
     payload: DashboardFilterRequest,
     db: Session = Depends(get_db),
@@ -93,7 +95,7 @@ def client_dashboard_summary(
     return get_client_dashboard_summary(db, payload_dict)
 
 
-@router.post("/client-analytics")
+@router.post("/client-Page-Graph")
 def client_analytics(
     payload: ClientAnalyticsRequest,
     db: Session = Depends(get_db),

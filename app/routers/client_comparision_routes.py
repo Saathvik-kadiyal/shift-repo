@@ -52,7 +52,7 @@ def get_client_departments(
 
 
 
-@router.post("/dashboard", response_model=DashboardResponse)
+@router.post("/dashboard-Table", response_model=DashboardResponse)
 def dashboard(
     filters: DashboardFilter,
     client_starts_with: Optional[str] = Query(
