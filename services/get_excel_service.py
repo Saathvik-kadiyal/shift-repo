@@ -12,18 +12,18 @@ WITH file-path caching (simple, default-latest only).
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from typing import Optional, Dict, List, Tuple, Any
-from datetime import datetime
 
 import pandas as pd
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from fastapi import HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from diskcache import Cache
 from fastapi.responses import FileResponse
-from sqlalchemy import or_
 
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
 from utils.shift_config import get_shift_string, get_all_shift_keys
@@ -154,6 +154,85 @@ def _months_from_years_months(years: Optional[List[int]], months: Optional[List[
     return out
 
 
+def _validate_shifts(payload: dict) -> None:
+    """
+    Validate 'shifts' payload:
+      - Accepts 'ALL' (no filter) OR string/list of valid shift keys.
+      - Validates against get_all_shift_keys() (case-insensitive).
+    """
+    shifts = payload.get("shifts")
+    if shifts is None:
+        return
+    if isinstance(shifts, str) and shifts.strip().upper() == "ALL":
+        return
+
+    if isinstance(shifts, str):
+        shift_list = [s.strip() for s in shifts.split(",") if s.strip()]
+    elif isinstance(shifts, list):
+        shift_list = [str(s).strip() for s in shifts if str(s).strip()]
+    else:
+        raise HTTPException(status_code=400, detail="Invalid 'shifts' format. Use 'ALL', a string, or a list.")
+
+    valid = {k.upper().strip() for k in get_all_shift_keys()}
+    unknown = [s for s in shift_list if s.upper() not in valid]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown shift key(s): {unknown}. Allowed: {sorted(valid)} or 'ALL'."
+        )
+
+
+_HEADCOUNT_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+
+def _parse_headcount_range(s: str) -> Tuple[int, int]:
+    """
+    Parse a single headcount range 'min-max'. '+' is not allowed.
+    """
+    if "+" in s:
+        raise HTTPException(status_code=400, detail="Headcounts must be ranges like '1-10'; '+' is not allowed.")
+    m = _HEADCOUNT_RANGE_RE.match(s)
+    if not m:
+        raise HTTPException(status_code=400, detail=f"Invalid headcount range '{s}'. Use 'min-max' (e.g., '1-10').")
+    lo, hi = int(m.group(1)), int(m.group(2))
+    if lo < 0 or hi < 0:
+        raise HTTPException(status_code=400, detail=f"Invalid headcount range '{s}'. Values must be non-negative.")
+    if lo > hi:
+        raise HTTPException(status_code=400, detail=f"Invalid headcount range '{s}'. Min cannot be greater than max.")
+    return lo, hi
+
+
+def _validate_headcounts(payload: dict) -> None:
+    """
+    Validate 'headcounts':
+      - 'ALL' (no filter)
+      - 'min-max', or CSV of such ranges, or list of 'min-max'.
+      - This service only validates; it does not filter by headcounts (aggregate concept).
+    """
+    hc = payload.get("headcounts")
+    if hc is None:
+        return
+    if isinstance(hc, str) and hc.strip().upper() == "ALL":
+        return
+
+    parts: List[str] = []
+    if isinstance(hc, str):
+        parts = [p.strip() for p in hc.split(",") if p.strip()]
+    elif isinstance(hc, list):
+        parts = [str(p).strip() for p in hc if str(p).strip()]
+    else:
+        raise HTTPException(status_code=400, detail="Invalid 'headcounts'. Use 'ALL', 'min-max', CSV, or list.")
+
+    for p in parts:
+        _parse_headcount_range(p)  
+
+
+def _validate_payload(payload: dict) -> None:
+    """Top-level payload validation for this service."""
+    _validate_shifts(payload)
+    _validate_headcounts(payload)
+  
+
+
 def _is_default_latest_month_payload(db: Session, payload: dict) -> bool:
     """
     Cache only when:
@@ -175,7 +254,7 @@ def _is_default_latest_month_payload(db: Session, payload: dict) -> bool:
     if not latest_ym:
         return False
 
-    
+   
     if not years and not months:
         return True
 
@@ -186,7 +265,6 @@ def _is_default_latest_month_payload(db: Session, payload: dict) -> bool:
     return sel == latest_ym
 
 
-
 def export_filtered_excel_df(
     db: Session,
     emp_id: Optional[str] = None,
@@ -195,7 +273,7 @@ def export_filtered_excel_df(
     end_month: Optional[str] = None,
     department: Optional[str] = None,
     client: Optional[str] = None,
-    payload: Optional[dict] = None,  # NEW
+    payload: Optional[dict] = None,  
 ) -> pd.DataFrame:
     """
     Return DataFrame ready for Excel export (shift headers from config).
@@ -213,38 +291,38 @@ def export_filtered_excel_df(
     shift_filter_values: Optional[List[str]] = None
     date_filter_clause = None
     sort_by = "total_allowance"
-    sort_order = "desc"  
+    sort_order = "desc" 
 
+    
     if payload is not None:
-        # Multi-value filters
+      
+        _validate_payload(payload)
+
+       
         clients = _normalize_multi(payload.get("clients"))
         departments = _normalize_multi(payload.get("departments"))
         shifts = _normalize_multi(payload.get("shifts"))
         years = payload.get("years")   
-        months = payload.get("months")    
-
+        months = payload.get("months") 
 
         if clients:
-            base_filters.append(
-                func.lower(func.trim(ShiftAllowances.client)).in_(clients)
-            )
+            base_filters.append(func.lower(func.trim(ShiftAllowances.client)).in_(clients))
 
-      
+       
         if departments:
-            base_filters.append(
-                func.lower(func.trim(ShiftAllowances.department)).in_(departments)
-            )
+            base_filters.append(func.lower(func.trim(ShiftAllowances.department)).in_(departments))
 
+       
         if shifts:
             join_shift_mapping = True
-           
             shift_filter_values = [s.upper() for s in shifts]
 
+     
         month_list = _months_from_years_months(years, months)
         if month_list:
             date_filter_clause = func.date_trunc("month", ShiftAllowances.duration_month).in_(month_list)
         else:
-        
+            
             current_month = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             latest_month = _latest_available_month_dt(db, base_filters, current_month)
             date_filter_clause = (func.date_trunc("month", ShiftAllowances.duration_month) == latest_month)
@@ -269,7 +347,6 @@ def export_filtered_excel_df(
         if start_month or end_month:
             if not start_month:
                 raise HTTPException(status_code=400, detail="start_month is required when end_month is provided")
-
             start_dt = _parse_month(start_month, "start_month")
             if end_month:
                 end_dt = _parse_month(end_month, "end_month")
@@ -285,6 +362,7 @@ def export_filtered_excel_df(
             latest_month = _latest_available_month_dt(db, base_filters, current_month)
             date_filter_clause = (func.date_trunc("month", ShiftAllowances.duration_month) == latest_month)
 
+   
     q = db.query(
         ShiftAllowances.id,
         ShiftAllowances.emp_id,
@@ -315,7 +393,6 @@ def export_filtered_excel_df(
     if not rows:
         raise HTTPException(status_code=404, detail="No records found for given filters")
 
-    
     allowance_map = {
         (item.shift_type or "").upper().strip(): float(item.amount or 0)
         for item in db.query(ShiftsAmount).all()
@@ -341,7 +418,6 @@ def export_filtered_excel_df(
             total_days += days
             total_allowance += amount
 
-           
             shift_details_parts.append(f"{shift_key}-{days:g}*{int(rate):,}=₹{int(amount):,}")
 
             header = shift_display_map.get(shift_key, shift_key)
@@ -387,15 +463,15 @@ def export_filtered_excel_df(
     df = df[ordered_cols]
 
     if sort_order == "default":
-        
         ascending = False if sort_by == "total_allowance" else True
     else:
         ascending = (str(sort_order).lower() == "asc")
 
     if sort_by in df.columns:
-        df = df.sort_values(by=sort_by, ascending=ascending, kind="mergesort")  # stable sort
+        df = df.sort_values(by=sort_by, ascending=ascending, kind="mergesort")  # stable
 
     return df
+
 
 def dataframe_to_excel_file(
     df: pd.DataFrame,
@@ -438,6 +514,7 @@ def dataframe_to_excel_file(
             "num_format": "₹ #,##0",
         })
 
+      
         for c, name in enumerate(df.columns):
             worksheet.write(0, c, name, header_fmt)
 
@@ -473,7 +550,7 @@ def _atomic_write_excel(df: pd.DataFrame, final_path: str, sheet_name: str = "Sh
             sheet_name=sheet_name,
             currency_cols=["total_allowance"],
         )
-        os.replace(temp_path, final_path) 
+        os.replace(temp_path, final_path)  
         return final_path
     finally:
         if os.path.exists(temp_path):
@@ -481,7 +558,6 @@ def _atomic_write_excel(df: pd.DataFrame, final_path: str, sheet_name: str = "Sh
                 os.remove(temp_path)
             except Exception:
                 pass
-
 
 def shift_excel_download_service(
     db: Session,
@@ -491,7 +567,7 @@ def shift_excel_download_service(
     end_month: Optional[str] = None,
     department: Optional[str] = None,
     client: Optional[str] = None,
-    payload: Optional[dict] = None,  
+    payload: Optional[dict] = None, 
 ) -> str:
     """
     Simple & safe cache:
@@ -499,8 +575,9 @@ def shift_excel_download_service(
       - Rebuilds automatically when latest DB month changes
       - If cached file is missing, regenerates
     """
-   
+  
     if payload is not None:
+        _validate_payload(payload)
         default_latest = _is_default_latest_month_payload(db, payload)
     else:
         default_latest = is_default_latest_month_request(
@@ -515,16 +592,13 @@ def shift_excel_download_service(
     cache_key = f"{LATEST_MONTH_KEY}:excel"
     latest_ym = _get_db_latest_ym(db)
 
+
     if default_latest:
         cached = cache.get(cache_key)
         if cached:
             cached_path = cached.get("file_path")
             cached_month = cached.get("_cached_month")
-            if (
-                cached_path and
-                os.path.exists(cached_path) and
-                cached_month == latest_ym
-            ):
+            if cached_path and os.path.exists(cached_path) and cached_month == latest_ym:
                 return cached_path
 
 
@@ -539,6 +613,7 @@ def shift_excel_download_service(
         payload=payload,
     )
 
+ 
     os.makedirs(EXPORT_DIR, exist_ok=True)
     if default_latest:
         file_path = os.path.join(EXPORT_DIR, DEFAULT_EXPORT_FILE)
@@ -548,6 +623,7 @@ def shift_excel_download_service(
 
     _atomic_write_excel(df, file_path, sheet_name="Shift Data")
 
+  
     if default_latest:
         cache.set(
             cache_key,

@@ -1799,14 +1799,7 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
  
     base_filters_extra: List[Any] = []
     if clients_filter:
-        client_conditions = []
-    for c in clients_filter:
-        pattern = f"{c.strip().lower()}%"
-        client_conditions.append(
-            func.lower(func.trim(ShiftAllowances.client)).like(pattern)
-        )
-    base_filters_extra.append(or_(*client_conditions))
-
+        base_filters_extra.append(func.lower(func.trim(ShiftAllowances.client)).in_([c.lower() for c in clients_filter]))
     if depts_filter:
         base_filters_extra.append(func.lower(func.trim(ShiftAllowances.department)).in_([d.lower() for d in depts_filter]))
 
