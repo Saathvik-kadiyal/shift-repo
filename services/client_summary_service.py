@@ -1,17 +1,16 @@
 """
-Client summary service for month and year-based analytics.
+Client summary service with multi-year, multi-month, shift, and headcount support.
 
-This module aggregates shift allowance data across clients, departments,
-employees, and time periods with caching for latest-month queries.
-
-Cache:
-- Versioned cache key ensures new code invalidates old cached results.
-- Validates cached month vs latest DB month and refreshes automatically.
+Features:
+- Filters by years, months, clients, departments, employees, client partners, shifts, headcount ranges.
+- Headcount range applied at dept level if departments selected, else at client level.
+- Validations for years, months, shifts, and headcount formats.
+- Caching for latest-month requests.
 """
 
 from __future__ import annotations
 from datetime import date, datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -23,14 +22,11 @@ from utils.shift_config import get_all_shift_keys
 
 cache = Cache("./diskcache/latest_month")
 
-CLIENT_SUMMARY_VERSION = "v2"
+CLIENT_SUMMARY_VERSION = "v3"
 LATEST_MONTH_KEY = f"client_summary_latest:{CLIENT_SUMMARY_VERSION}"
 CACHE_TTL = 24 * 60 * 60  # 24 hours
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def clean_str(value: Any) -> str:
     """Normalize strings from DB"""
     if value is None:
@@ -63,8 +59,8 @@ def is_default_latest_month_request(payload: dict) -> bool:
         not payload
         or (
             payload.get("clients") in (None, "ALL")
-            and not payload.get("selected_year")
-            and not payload.get("selected_months")
+            and not payload.get("years")
+            and not payload.get("months")
             and not payload.get("emp_id")
             and not payload.get("client_partner")
         )
@@ -75,20 +71,62 @@ def validate_year(year: int) -> None:
     """Validate year is not in future or invalid"""
     current_year = date.today().year
     if year <= 0:
-        raise HTTPException(400, "selected_year must be greater than 0")
+        raise HTTPException(400, "Year must be greater than 0")
     if year > current_year:
-        raise HTTPException(400, "selected_year cannot be in the future")
+        raise HTTPException(400, "Year cannot be in the future")
 
 
-def parse_yyyy_mm(value: str) -> date:
-    """Parse YYYY-MM string to date"""
-    try:
-        return datetime.strptime(value, "%Y-%m").date().replace(day=1)
-    except Exception as exc:
-        raise HTTPException(400, "Invalid month format. Expected YYYY-MM") from exc
+def validate_months(months: List[int]) -> None:
+    """Validate month integers"""
+    for m in months:
+        if not 1 <= int(m) <= 12:
+            raise HTTPException(400, f"Invalid month: {m}")
 
 
-def normalize_clients(clients_payload: Optional[dict]) -> tuple[Dict[str, list], Dict[str, str], dict]:
+def parse_headcount_ranges(headcounts_payload):
+
+    if headcounts_payload == "ALL":
+        return None
+
+    if isinstance(headcounts_payload, str):
+        headcounts_payload = [headcounts_payload]
+
+    ranges = []
+
+    for h in headcounts_payload:
+
+        if "-" in h:
+            parts = h.split("-")
+
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid headcount range format: {h}. Use '1-5'"
+                )
+
+            start = int(parts[0])
+            end = int(parts[1])
+
+            if start > end:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid headcount range: {h}"
+                )
+
+        elif h.isdigit():
+            start = end = int(h)
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid headcount range format: {h}"
+            )
+
+        ranges.append((start, end))
+
+    return ranges
+
+def normalize_clients(clients_payload: Optional[Any], depts_payload: Optional[Any]) -> Tuple[Dict[str, list], Dict[str, str], dict]:
     """Normalize clients and departments"""
     normalized_clients: dict = {}
     client_name_map: dict = {}
@@ -97,20 +135,23 @@ def normalize_clients(clients_payload: Optional[dict]) -> tuple[Dict[str, list],
     if not clients_payload or clients_payload == "ALL":
         return normalized_clients, client_name_map, dept_name_map
 
-    if not isinstance(clients_payload, dict):
-        raise HTTPException(400, "clients must be 'ALL' or {client: [departments]}")
+    if isinstance(clients_payload, str):
+        clients_payload = [clients_payload]
 
-    for client, depts in clients_payload.items():
+    for client in clients_payload:
         client_clean = clean_str(client)
         client_lc = client_clean.lower()
         client_name_map[client_lc] = client_clean
-        normalized_clients[client_lc] = []
 
-        for dept in depts or []:
-            dept_clean = clean_str(dept)
-            dept_lc = dept_clean.lower()
-            dept_name_map[(client_lc, dept_lc)] = dept_clean
-            normalized_clients[client_lc].append(dept_lc)
+        depts_list = []
+        if depts_payload not in (None, "ALL"):
+            if isinstance(depts_payload, str):
+                depts_payload = [depts_payload]
+            for d in depts_payload:
+                d_clean = clean_str(d)
+                dept_name_map[(client_lc, d_clean.lower())] = d_clean
+                depts_list.append(d_clean.lower())
+        normalized_clients[client_lc] = depts_list
 
     return normalized_clients, client_name_map, dept_name_map
 
@@ -148,12 +189,8 @@ def build_base_query(db: Session):
         )
     )
 
-
-# -----------------------------
-# Main Service
-# -----------------------------
 def client_summary_service(db: Session, payload: dict):
-    """Return client summary with monthly/year filters"""
+    """Return client summary with multi-year, multi-month, shift, and headcount filters"""
 
     payload = payload or {}
     shift_keys = get_shift_keys()
@@ -161,12 +198,32 @@ def client_summary_service(db: Session, payload: dict):
 
     emp_id = payload.get("emp_id")
     client_partner = payload.get("client_partner")
-    selected_year = payload.get("selected_year")
-    selected_months = payload.get("selected_months", [])
+    selected_years = payload.get("years", [])
+    selected_months = payload.get("months", [])
+    shifts = payload.get("shifts", "ALL")
+    headcounts_payload = payload.get("headcounts", "ALL")
 
+
+    if selected_years:
+        for y in selected_years:
+            validate_year(int(y))
+    if selected_months:
+        validate_months(selected_months)
+
+    if shifts != "ALL":
+        if isinstance(shifts, str):
+            shifts = [shifts]
+        shifts_upper = [clean_str(s).upper() for s in shifts]
+        invalid_shifts = [s for s in shifts_upper if s not in shift_key_set]
+        if invalid_shifts:
+            raise HTTPException(400, f"Invalid shift(s): {invalid_shifts}")
+        shift_key_set = set(shifts_upper)  
+
+    headcount_ranges = parse_headcount_ranges(headcounts_payload)
+
+    
     use_cache = is_default_latest_month_request(payload)
     latest_ym: Optional[str] = None
-
     if use_cache:
         try:
             latest_ym = get_latest_month(db).strftime("%Y-%m")
@@ -179,26 +236,24 @@ def client_summary_service(db: Session, payload: dict):
                 if cached.get("_cached_month") == latest_ym:
                     return cached["data"]
 
-    normalized_clients, client_name_map, dept_name_map = normalize_clients(payload.get("clients"))
+    normalized_clients, client_name_map, dept_name_map = normalize_clients(
+        payload.get("clients"), payload.get("departments")
+    )
 
-    months: list[date] = []
-    if selected_year:
-        validate_year(int(selected_year))
-        if selected_months:
-            months = [date(int(selected_year), int(m), 1) for m in selected_months]
-        else:
-            months = [date(int(selected_year), m, 1) for m in range(1, 13)]
+    months: List[date] = []
+    if selected_years:
+        for y in selected_years:
+            if selected_months:
+                months.extend([date(int(y), int(m), 1) for m in selected_months])
+            else:
+                months.extend([date(int(y), m, 1) for m in range(1, 13)])
     else:
         months = [get_latest_month(db)]
 
-    response: dict = {}
-    periods = [m.strftime("%Y-%m") for m in months]
-    for period in periods:
-        response[period] = {"message": f"No data found for {period}"}
+    response: dict = {m.strftime("%Y-%m"): {"message": f"No data found for {m.strftime('%Y-%m')}"} for m in months}
 
     query = build_base_query(db)
 
-    # Client/Department filters
     if normalized_clients:
         filters = []
         for client_lc, depts_lc in normalized_clients.items():
@@ -214,7 +269,9 @@ def client_summary_service(db: Session, payload: dict):
         query = query.filter(or_(*filters))
 
     if emp_id:
-        query = query.filter(func.lower(ShiftAllowances.emp_id) == clean_str(emp_id).lower())
+        if isinstance(emp_id, str):
+            emp_id = [emp_id]
+        query = query.filter(func.lower(ShiftAllowances.emp_id).in_([clean_str(e).lower() for e in emp_id]))
 
     if client_partner:
         col = ShiftAllowances.client_partner
@@ -229,6 +286,7 @@ def client_summary_service(db: Session, payload: dict):
         else:
             query = query.filter(func.lower(col).like(f"%{clean_str(client_partner).lower()}%"))
 
+  
     query = query.filter(
         or_(
             *[
@@ -244,6 +302,10 @@ def client_summary_service(db: Session, payload: dict):
     rows = query.all()
 
     for dm, client, dept, eid, ename, cp, stype, days, amt in rows:
+        stype_norm = clean_str(stype).upper()
+        if stype_norm not in shift_key_set:
+            continue
+
         period_key = dm.strftime("%Y-%m")
         if "message" in response.get(period_key, {}):
             response[period_key] = {
@@ -256,7 +318,6 @@ def client_summary_service(db: Session, payload: dict):
             }
 
         month_block = response[period_key]
-
         client_safe = clean_str(client)
         dept_safe = clean_str(dept)
         cp_safe = clean_str(cp)
@@ -264,10 +325,6 @@ def client_summary_service(db: Session, payload: dict):
         client_name = client_name_map.get(client_safe.lower(), client_safe or "UNKNOWN")
         dept_name = dept_name_map.get((client_safe.lower(), dept_safe.lower()), dept_safe or "UNKNOWN")
         cp_display = cp_safe or "UNKNOWN"
-
-        stype_norm = clean_str(stype).upper()
-        if stype_norm not in shift_key_set:
-            continue
 
         total = float(days or 0) * float(amt or 0)
 
@@ -294,17 +351,25 @@ def client_summary_service(db: Session, payload: dict):
 
         employee = next((e for e in dept_block["employees"] if e["emp_id"] == eid), None)
         if not employee:
-            employee = {
-                "emp_id": eid,
-                "emp_name": ename,
-                "client_partner": cp_display,
-                **{k: 0.0 for k in shift_keys},
-                "total": 0.0,
-            }
-            dept_block["employees"].append(employee)
-            dept_block["dept_head_count"] += 1
-            client_block["client_head_count"] += 1
-            month_block["month_total"]["total_head_count"] += 1
+            
+            prospective_dept_headcount = dept_block["dept_head_count"] + 1
+            prospective_client_headcount = client_block["client_head_count"] + 1
+            total_headcount_for_check = prospective_dept_headcount if normalized_clients else prospective_client_headcount
+
+            if any(start <= total_headcount_for_check <= end for start, end in headcount_ranges):
+                employee = {
+                    "emp_id": eid,
+                    "emp_name": ename,
+                    "client_partner": cp_display,
+                    **{k: 0.0 for k in shift_keys},
+                    "total": 0.0,
+                }
+                dept_block["employees"].append(employee)
+                dept_block["dept_head_count"] += 1
+                client_block["client_head_count"] += 1
+                month_block["month_total"]["total_head_count"] += 1
+            else:
+                continue  
 
         employee[stype_norm] += total
         employee["total"] += total
