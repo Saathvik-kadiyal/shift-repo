@@ -26,25 +26,20 @@ from diskcache import Cache
 
 from utils.shift_config import get_all_shift_keys, get_shift_string
 from services.client_summary_service import (
-    client_summary_service,           # builds data per business rules
-    is_default_latest_month_request,  # determines if payload is "default latest"
+    client_summary_service,          
+    is_default_latest_month_request,  
     LATEST_MONTH_KEY,
     CACHE_TTL,
 )
 from models.models import ShiftAllowances
 
-# -----------------------------
-# Cache & paths
-# -----------------------------
+
 cache = Cache("./diskcache/latest_month")
 
 EXPORT_DIR = "exports"
 DEFAULT_EXPORT_FILE = "client_summary_latest.xlsx"
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def _shift_header(key: str) -> str:
     """Excel header label for shift key using config (may include '\n')."""
     return get_shift_string(key) or key
@@ -87,12 +82,12 @@ def _normalize_multi_str_or_list(value: Any) -> Optional[Set[str]]:
     if isinstance(value, str):
         if value.strip().upper() == "ALL":
             return None
-        # allow comma-separated values too
+       
         parts = [p.strip() for p in value.split(",") if p.strip()]
         return set(parts) if parts else None
     if isinstance(value, list):
         parts = [str(p).strip() for p in value if str(p).strip()]
-        # treat ["ALL"] as no filter
+      
         if len(parts) == 1 and parts[0].upper() == "ALL":
             return None
         return set(parts) if parts else None
@@ -133,7 +128,7 @@ def _write_excel_to_path(df: pd.DataFrame, currency_cols: List[str], file_path: 
             "num_format": "₹ #,##0",
         })
 
-        # Headers
+    
         for c, col_name in enumerate(df.columns):
             ws.write(0, c, col_name, header_fmt)
 
@@ -142,7 +137,7 @@ def _write_excel_to_path(df: pd.DataFrame, currency_cols: List[str], file_path: 
 
         currency_set = set(currency_cols)
 
-        # Column widths + formats
+       
         for c, col_name in enumerate(df.columns):
             lines = str(col_name).split("\n")
             longest = max((len(x) for x in lines), default=len(str(col_name)))
@@ -166,7 +161,7 @@ def _atomic_write_excel(df: pd.DataFrame, currency_cols: List[str], final_path: 
     os.close(fd)
     try:
         _write_excel_to_path(df, currency_cols, temp_path)
-        os.replace(temp_path, final_path)  # atomic move on same filesystem
+        os.replace(temp_path, final_path)  
         return final_path
     finally:
         if os.path.exists(temp_path):
@@ -205,9 +200,8 @@ def _build_dataframe_from_summary(
             for dept_name, dept_block in departments.items():
                 employees = dept_block.get("employees", [])
 
-                # Department-level row when there are no employees listed
                 if not employees:
-                    # Department-only row passes if partner filter is absent or matches
+                  
                     if partner_filter and partner_value not in partner_filter:
                         continue
 
@@ -253,7 +247,6 @@ def _build_dataframe_from_summary(
 
     df = pd.DataFrame(rows)
 
-    # Ordering
     df["Period"] = pd.to_datetime(df["Period"], format="%Y-%m", errors="coerce")
     df = df.sort_values(by=["Period", "Client", "Department", "Employee ID"])
     df["Period"] = df["Period"].dt.strftime("%Y-%m")
@@ -282,9 +275,7 @@ def _stable_cache_key(payload: dict, default_req: bool, shift_sig: Optional[Tupl
     return f"client_summary:{_payload_hash(payload)}.xlsx"
 
 
-# -----------------------------
-# Public service
-# -----------------------------
+
 def client_summary_download_service(db: Session, payload: dict) -> str:
     """
     Generate and export client summary Excel with a simplified caching strategy.
@@ -302,7 +293,7 @@ def client_summary_download_service(db: Session, payload: dict) -> str:
     cache_key = _stable_cache_key(payload, default_req, shift_sig)
     final_default_path = os.path.join(EXPORT_DIR, DEFAULT_EXPORT_FILE)
 
-    # Try cache
+    
     cached = cache.get(cache_key)
     if cached:
         cached_path = cached.get("file_path")
@@ -323,19 +314,18 @@ def client_summary_download_service(db: Session, payload: dict) -> str:
             if cached_path and os.path.exists(cached_path):
                 return cached_path
 
-    # Build the summary data from your business service
     summary_data = client_summary_service(db, payload)
     if not summary_data:
         raise HTTPException(404, "No data available")
 
-    # Normalize filters that are lists/strings into sets
+
     emp_ids_filter = _normalize_multi_str_or_list(payload.get("emp_id"))
     partner_filter = _normalize_multi_str_or_list(payload.get("client_partner"))
 
     df, shift_cols = _build_dataframe_from_summary(summary_data, emp_ids_filter, partner_filter)
     currency_cols = shift_cols + ["Total Allowance"]
 
-    # Default latest -> stable file name + cache with month + shift signature
+    
     if default_req:
         written_path = _atomic_write_excel(df, currency_cols, final_default_path)
         cache.set(
@@ -349,7 +339,6 @@ def client_summary_download_service(db: Session, payload: dict) -> str:
         )
         return written_path
 
-    # Non-default -> payload hash-based file name
     hashed_name = cache_key.split(":", 1)[-1]
     if not hashed_name.endswith(".xlsx"):
         hashed_name += ".xlsx"
