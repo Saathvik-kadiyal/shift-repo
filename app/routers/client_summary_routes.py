@@ -1,11 +1,6 @@
-"""
-Routes for client summary data retrieval.
-Supports month, quarter, range, employee, and account manager filters.
-"""
 
 from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
-
 from db import get_db
 from utils.dependencies import get_current_user
 from services.client_summary_service import client_summary_service
@@ -15,42 +10,22 @@ router = APIRouter(
     tags=["Client Summary"],
 )
 
-
-@router.post(
-    "",
-    summary="Get client summary",
-    description=(
-        "Returns client summary based on filters like clients, "
-        "date range, employee, and client partner."
-    ),
-)
+@router.post("/")
 def client_summary(
     payload: dict = Body(
-        default={},
+        ...,
         example={
-            "emp_id": ["IN01804611"],
-            "client_partner": ["John Doe"],
-            "clients": "ALL",
-            "selected_year": "YYYY",
-            "selected_months": ["01", "02"],
-            "selected_quarters": ["Q1"],
-            "start_month": "YYYY-MM",
-            "end_month": "YYYY-MM",
+            "years": [2025, 2026],         # Multi-year
+            "months": [1, 2, 3],           # Multi-month (Cartesian years × months; future months in current year excluded)
+            "clients": "ALL",              # or "Foo", or ["Foo","Bar"]
+            "departments": "ALL",          # or "Dept A", or ["Dept A","Dept B"]
+            "emp_id": ["IN01804611"],      # optional: string or list[str]
+            "client_partner": ["John Doe"],# optional: string or list[str]
+            "shifts": "US_INDIA",          # "ALL", string, or list[str]; validated against configured keys
+            "headcounts": "1-10"           # "ALL", "n", "a-b", or list like ["1-10","11-20","25"]
         },
     ),
     db: Session = Depends(get_db),
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(get_current_user)
 ):
-    """
-    Return client summary based on provided filters.
-
-    Notes:
-    - `clients` can be `"ALL"` or `{ "Client": ["Dept1", "Dept2"] }`
-    - If no date filter is provided, the latest available month is returned
-    - `emp_ids` filters specific employees
-    - `account_managers` filters by account manager names
-
-    Delegates all data retrieval and aggregation to
-    `client_summary_service`.
-    """
     return client_summary_service(db=db, payload=payload)

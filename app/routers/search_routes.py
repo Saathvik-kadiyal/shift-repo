@@ -14,51 +14,67 @@ router = APIRouter(
 
 @router.post("/search")
 def fetch_employee_details(
-    payload: dict = Body(..., example={
-        "emp_id": "IN01804611",
-        "client_partner": "John Doe",
-        "clients": "ALL",
-        "department": "Infra - IT Operations",
-        "start_month": "YYYY-MM",
-        "end_month": "YYYY-MM",
-        "start": 0,
-        "limit": 10,
-        "selected_year": "YYYY",
-        "selected_months": ["01", "02"],
-        "selected_quarters": ["Q1"]
-    }),
+    payload: dict = Body(
+        ...,
+        example={
+            "emp_id": "IN01804611",
+            "client_partner": "John Doe",
+
+            # Clients/Departments can be "ALL", a single string, or a list of strings
+            "clients": "ALL",
+            "departments": "ALL",
+
+            # Multi-year and multi-month selection (no start_month/end_month).
+            # If neither provided -> current month (or fallback to latest within last 12 months).
+            # If months provided without years -> current year.
+            "years": [2025],
+            "months": [1, 2, 3],
+
+            # Shifts can be "ALL", a string or list[str] (e.g. ["US_INDIA","PST_MST"])
+            "shifts": "ALL",
+
+            # Headcount filter by range(s). Applies per department if departments != "ALL", else per client.
+            # Accepts "ALL", a single string "1-10", or list like ["1-10","11-20"].
+            "headcounts": "ALL",
+
+            # Pagination
+            "start": 0,
+            "limit": 10,
+
+            # Employee list sorting (no summary)
+            "sort_by": "total_allowance",      # "client" | "client_partner" | "departments" | "headcount" | "total_allowance"
+            "sort_order": "default"            # "default" | "asc" | "desc"
+        }
+    ),
     db: Session = Depends(get_db),
     _current_user=Depends(get_current_user),
 ):
     """
     Fetch employee shift details using the provided request body filters.
 
-    Filters supported:
-    - Employee ID
-    - client partner
-    - Single Client (clients)
-    - Optional Department (department)
-    - Start and End Month
-    - Selected Year, Selected Months, Selected Quarters
-    - Pagination (start, limit)
-
-    All validation, filtering, and aggregation is handled by
-    the service layer `export_filtered_excel`.
-
-    Returns:
-        dict: Employee shift details including shift-wise allowances and totals.
+    Notes:
+    - No date-range (start_month, end_month) supported.
+    - If neither years nor months are provided → current month (if no data, fallback within last 12 months).
+    - If months provided without years → current year (exclude future months).
+    - Pagination is applied on UNIQUE employees (aggregated across selected months).
+    - 'headcounts' filter applies to group headcount (per department if departments != "ALL", else per client).
     """
+    # Backward-compat support for legacy keys if present
+    clients_payload = payload.get("clients", payload.get("client", "ALL"))
+    departments_payload = payload.get("departments", payload.get("department", "ALL"))
+
     return export_filtered_excel(
         db=db,
         emp_id=payload.get("emp_id"),
         client_partner=payload.get("client_partner"),
-        start_month=payload.get("start_month"),
-        end_month=payload.get("end_month"),
         start=payload.get("start", 0),
         limit=payload.get("limit", 10),
-        clients=payload.get("client"),
-        department=payload.get("department"),
-        selected_year=payload.get("selected_year"),
-        selected_months=payload.get("selected_months", []),
-        selected_quarters=payload.get("selected_quarters", [])
+        clients=clients_payload,
+        departments=departments_payload,
+        years=payload.get("years"),
+        months=payload.get("months"),
+        shifts=payload.get("shifts", "ALL"),
+        headcounts=payload.get("headcounts", "ALL"),
+        sort_by=payload.get("sort_by", "total_allowance"),
+        sort_order=payload.get("sort_order", "default"),
     )

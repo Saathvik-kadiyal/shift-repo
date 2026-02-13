@@ -1,60 +1,34 @@
-"""Shift allowance export service.
-
-Fetches and aggregates employee shift allowance data. Filtering is done
-using duration_month only, while payroll_month is shown for display.
-
-Future years, months, or quarters are not allowed. If a quarter is
-selected, it must have started and have complete data for all months.
-
-If no filters are selected, the latest month available in the database
-is returned. Results are sorted by month, include shift-wise totals,
-and support pagination and employee-level summaries.
-
-Client filtering supports single client with optional department:
-- client="ALL" → all clients
-- client="DZS Inc", department=None → filter by client only
-- client="DZS Inc", department="Infra - IT Operations" → filter by client + dept
-"""
+"""Shift allowance export service with proper headcount and shift filtering."""
 
 import re
 from datetime import datetime, date
+from typing import List, Union, Optional, Dict, Any, Tuple
+from collections import Counter
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, extract
+from sqlalchemy import func, and_, or_, extract
+from sqlalchemy.sql import exists
 
 from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
 from utils.client_enums import Company
 from utils.shift_config import get_all_shift_keys, get_allowance_columns
 
 
-def validate_year(year: str):
-    """Validate selected year is a 4-digit integer and not in future."""
-    if not year.isdigit() or len(year) != 4:
-        raise HTTPException(400, "selected_year must be a 4-digit year (YYYY)")
-    year_int = int(year)
-    if year_int > date.today().year:
-        raise HTTPException(400, "Future year cannot be selected")
-    return year_int
+def _validate_year_int(y: int, today: Optional[date] = None) -> int:
+    today = today or date.today()
+    if not (1000 <= y <= 9999):
+        raise HTTPException(400, "Years must be 4-digit integers (YYYY)")
+    if y > today.year:
+        raise HTTPException(400, f"Future year {y} cannot be selected")
+    return y
 
-
-def validate_month(month: str):
-    """Validate month string is 01-12."""
-    if not month.isdigit() or not 1 <= int(month) <= 12:
-        raise HTTPException(400, "selected_months must be between 01 and 12")
-    return int(month)
-
-
-def validate_quarters(quarters):
-    """Ensure selected quarters are one of Q1-Q4."""
-    valid = {"Q1", "Q2", "Q3", "Q4"}
-    for q in quarters:
-        if q.upper() not in valid:
-            raise HTTPException(400, "selected_quarters must be one of Q1, Q2, Q3, Q4")
-
+def _validate_month_int(m: int) -> int:
+    if not (1 <= m <= 12):
+        raise HTTPException(400, "Months must be integers between 1 and 12")
+    return m
 
 def normalize_company_name(client: str | None):
-    """Normalize client name using Company enum if exists."""
     if not client:
         return None
     for company in Company:
@@ -62,43 +36,36 @@ def normalize_company_name(client: str | None):
             return company.value
     return client
 
+def _normalize_to_list(value: Union[str, List[str], None]) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        vals = [str(v).strip() for v in value if str(v).strip()]
+        return vals or None
+    s = str(value).strip()
+    return [s] if s and s.upper() != "ALL" else None
 
-def apply_client_department_filters(query, client=None, department=None):
-    """
-    Search-based filtering for client and/or department.
-    Works independently or together.
-    """
+def apply_client_department_filters(query, clients=None, departments=None):
+    client_values = _normalize_to_list(clients)
+    dept_values = _normalize_to_list(departments)
+
     conditions = []
+    if client_values:
+        like_terms = []
+        for c in client_values:
+            norm = normalize_company_name(c) or c
+            like_terms.append(func.upper(ShiftAllowances.client).like(f"%{norm.strip().upper()}%"))
+        conditions.append(or_(*like_terms))
 
-    if client and client.strip().upper() != "ALL":
-        client_norm = normalize_company_name(client)
-        conditions.append(
-            func.upper(ShiftAllowances.client).like(f"%{client_norm.strip().upper()}%")
-        )
-
-    if department:
-        conditions.append(
-            func.upper(ShiftAllowances.department).like(f"%{department.strip().upper()}%")
-        )
+    if dept_values:
+        like_terms = [func.upper(ShiftAllowances.department).like(f"%{d.strip().upper()}%") for d in dept_values]
+        conditions.append(or_(*like_terms))
 
     if conditions:
         return query.filter(and_(*conditions))
-
     return query
 
-
-def get_quarter_months(q):
-    """Return list of months for given quarter string."""
-    return {
-        "Q1": [1, 2, 3],
-        "Q2": [4, 5, 6],
-        "Q3": [7, 8, 9],
-        "Q4": [10, 11, 12],
-    }[q]
-
-
 def get_default_start_month(db: Session) -> str:
-    """Get the most recent month with data in the last 12 months."""
     today = datetime.now().replace(day=1)
     for i in range(12):
         y = today.year
@@ -106,215 +73,355 @@ def get_default_start_month(db: Session) -> str:
         if m <= 0:
             m += 12
             y -= 1
-        month_str = f"{y:04d}-{m:02d}"
-        exists = db.query(ShiftAllowances.id).filter(
-            func.to_char(ShiftAllowances.duration_month, "YYYY-MM") == month_str
+        ym = f"{y:04d}-{m:02d}"
+        exists_row = db.query(ShiftAllowances.id).filter(
+            func.to_char(ShiftAllowances.duration_month, "YYYY-MM") == ym
         ).first()
-        if exists:
-            return month_str
+        if exists_row:
+            return ym
     raise HTTPException(404, "No data found in the last 12 months")
 
+def _resolve_periods_with_meta(
+    db: Session,
+    years: Optional[List[int]],
+    months: Optional[List[int]]
+) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
+    today = date.today()
+    meta: Dict[str, Any] = {
+        "assumed_current_year": False,
+        "current_month_attempted": None,
+        "current_month_fallback_used": None,
+        "excluded_future_periods": [],
+    }
 
+    if not years and not months:
+        current_ym = f"{today.year:04d}-{today.month:02d}"
+        meta["current_month_attempted"] = current_ym
+        has_current = db.query(ShiftAllowances.id).filter(
+            func.to_char(ShiftAllowances.duration_month, "YYYY-MM") == current_ym
+        ).first()
+        if has_current:
+            return [(today.year, today.month)], meta
+        latest = get_default_start_month(db)
+        meta["current_month_fallback_used"] = latest
+        y, m = latest.split("-")
+        return [(int(y), int(m))], meta
+
+    years_norm = [_validate_year_int(int(y), today) for y in (years or [])]
+    months_norm = [_validate_month_int(int(m)) for m in (months or [])]
+    periods: List[Tuple[int, int]] = []
+
+    if months_norm and not years_norm:
+        meta["assumed_current_year"] = True
+        y = today.year
+        for m in months_norm:
+            if m > today.month:
+                meta["excluded_future_periods"].append(f"{y:04d}-{m:02d}")
+                continue
+            periods.append((y, m))
+    elif months_norm and years_norm:
+        for y in years_norm:
+            for m in months_norm:
+                if y == today.year and m > today.month:
+                    meta["excluded_future_periods"].append(f"{y:04d}-{m:02d}")
+                    continue
+                periods.append((y, m))
+    elif years_norm and not months_norm:
+        for y in years_norm:
+            upper = today.month if y == today.year else 12
+            for m in range(1, upper + 1):
+                periods.append((y, m))
+
+    periods = sorted(set(periods))
+    if not periods:
+        fut = meta["excluded_future_periods"]
+        if fut:
+            raise HTTPException(400, f"All requested periods are in the future: {', '.join(fut)}")
+        raise HTTPException(404, "No valid (year, month) periods to query")
+
+    return periods, meta
+
+_HEADCOUNT_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+_SINGLE_NUM_RE = re.compile(r"^\s*(\d+)\s*$")
+
+def _parse_headcount_ranges(headcounts: Union[str, List[str], None]) -> Optional[List[Tuple[int, int]]]:
+    vals = _normalize_to_list(headcounts)
+    if not vals:
+        return None
+    ranges: List[Tuple[int, int]] = []
+    for token in vals:
+        for part in token.split(","):
+            part = part.strip()
+            m = _HEADCOUNT_RANGE_RE.match(part)
+            if m:
+                a, b = int(m.group(1)), int(m.group(2))
+                if a <= 0 or b <= 0:
+                    raise HTTPException(400, "Headcount range values must be positive integers")
+                if a > b:
+                    a, b = b, a
+                ranges.append((a, b))
+                continue
+            n = _SINGLE_NUM_RE.match(part)
+            if n:
+                v = int(n.group(1))
+                if v <= 0:
+                    raise HTTPException(400, "Headcount value must be a positive integer")
+                ranges.append((v, v))
+                continue
+            raise HTTPException(
+                400,
+                f"Invalid headcount range value: '{part}'. Use numeric ranges like '1-5' or single numbers like '3'."
+            )
+    return ranges
+
+def _apply_headcount_filter(unique_employees: List[Dict[str, Any]], group_key: Optional[str], ranges: Optional[List[Tuple[int, int]]]) -> List[Dict[str, Any]]:
+    """Filters employees based on headcount.
+    - If group_key is None, treat as individual employees and select by position in list.
+    - If group_key is provided, filter groups by employee count in range.
+    """
+    if not ranges:
+        return unique_employees
+
+    if group_key is None:
+       
+        allowed_indices = set()
+        for lo, hi in ranges:
+            allowed_indices.update(range(lo, hi+1))
+        filtered = [e for i, e in enumerate(unique_employees, start=1) if i in allowed_indices]
+        return filtered
+
+    
+    group_vals = [str(emp.get(group_key) or "UNKNOWN").upper() for emp in unique_employees]
+    counts = Counter(group_vals)
+    allowed_groups = set()
+    for grp, cnt in counts.items():
+        for lo, hi in ranges:
+            if lo <= cnt <= hi:
+                allowed_groups.add(grp.upper())
+                break
+    return [emp for emp in unique_employees if str(emp.get(group_key) or "UNKNOWN").upper() in allowed_groups]
+
+def _compute_row_totals(db: Session, row, rates: Dict[str, float]):
+    shift_days: Dict[str, float] = {}
+    total = 0.0
+    mappings = db.query(ShiftMapping).filter(ShiftMapping.shiftallowance_id == row.id).all()
+    for m in mappings:
+        days = float(m.days or 0)
+        if days <= 0:
+            continue
+        shift_key = (m.shift_type or "").upper().strip()
+        rate = float(rates.get(shift_key, 0.0))
+        amount = days * rate
+        shift_days[shift_key] = shift_days.get(shift_key, 0.0) + amount
+        total += amount
+    return shift_days, total
+
+def _aggregate_unique_employees(db: Session, rows, rates: Dict[str, float]) -> List[Dict[str, Any]]:
+    def _ym_to_key(ym: str) -> Tuple[int, int]:
+        y, m = ym.split("-")
+        return int(y), int(m)
+
+    agg: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        row_shift_days, row_total = _compute_row_totals(db, row, rates)
+        emp_id = row.emp_id
+        latest_ym = row.duration_month
+        if emp_id not in agg:
+            agg[emp_id] = {
+                "emp_id": row.emp_id,
+                "emp_name": row.emp_name,
+                "department": row.department or "UNKNOWN",
+                "client": row.client or "UNKNOWN",
+                "project": row.project,
+                "client_partner": row.client_partner,
+                "duration_month": row.duration_month,
+                "payroll_month": row.payroll_month,
+                "shift_details": dict(row_shift_days),
+                "total_allowance": float(row_total),
+                "_latest_key": _ym_to_key(latest_ym),
+            }
+        else:
+            cur = agg[emp_id]
+            for k, v in row_shift_days.items():
+                cur["shift_details"][k] = cur["shift_details"].get(k, 0.0) + v
+            cur["total_allowance"] += float(row_total)
+            if _ym_to_key(latest_ym) > cur["_latest_key"]:
+                cur["_latest_key"] = _ym_to_key(latest_ym)
+                cur["department"] = row.department or "UNKNOWN"
+                cur["client"] = row.client or "UNKNOWN"
+                cur["project"] = row.project
+                cur["client_partner"] = row.client_partner
+                cur["duration_month"] = row.duration_month
+                cur["payroll_month"] = row.payroll_month
+
+    unique_employees: List[Dict[str, Any]] = []
+    for emp in agg.values():
+        emp["shift_details"] = {k: round(v, 2) for k, v in emp["shift_details"].items()}
+        emp["total_allowance"] = round(float(emp["total_allowance"]), 2)
+        emp.pop("_latest_key", None)
+        unique_employees.append(emp)
+    return unique_employees
 
 def aggregate_shift_details(db, rows, rates):
-    """
-    Aggregate shift allowance amounts by SHIFT KEY only:
-    PST_MST, US_INDIA, SG, ANZ 
-    """
-  
     overall = {k: 0.0 for k in get_all_shift_keys()}
-
     total = 0.0
     for row in rows:
-        mappings = db.query(ShiftMapping).filter(
-            ShiftMapping.shiftallowance_id == row.id
-        ).all()
-
+        mappings = db.query(ShiftMapping).filter(ShiftMapping.shiftallowance_id == row.id).all()
         for m in mappings:
             days = float(m.days or 0)
             if days <= 0:
                 continue
-
             shift_key = (m.shift_type or "").upper().strip()
             rate = float(rates.get(shift_key, 0.0))
-
             amount = days * rate
-
-            overall.setdefault(shift_key, 0.0)
             overall[shift_key] += amount
             total += amount
-
     return overall, total
-
-
-def prepare_employee_data(db, rows, rates):
-    """
-    Prepare employee-wise shift and allowance details using SHIFT KEY only.
-    """
-    employees = []
-    for row in rows:
-        rec = row._asdict()
-        shift_id = rec.pop("id")
-
-        emp_shift_days = {}
-        total = 0.0
-
-        mappings = db.query(ShiftMapping).filter(
-            ShiftMapping.shiftallowance_id == shift_id
-        ).all()
-
-        for m in mappings:
-            days = float(m.days or 0)
-            if days <= 0:
-                continue
-
-            shift_key = (m.shift_type or "").upper().strip()
-            rate = float(rates.get(shift_key, 0.0))
-            total += days * rate
-
-            emp_shift_days[shift_key] = emp_shift_days.get(shift_key, 0.0) + days
-
-        rec["shift_details"] = {k: int(v) for k, v in emp_shift_days.items()}
-        rec["total_allowance"] = round(total, 2)
-        employees.append(rec)
-
-    return employees
-
 
 def export_filtered_excel(
     db: Session,
-    emp_id=None,
-    client_partner=None,
-    start_month=None,
-    end_month=None,
-    start=0,
-    limit=10,
-    clients="ALL",
-    department=None,
-    selected_year=None,
-    selected_months=None,
-    selected_quarters=None,
+    emp_id: Optional[str] = None,
+    client_partner: Optional[str] = None,
+    start: int = 0,
+    limit: int = 10,
+    clients: Union[str, List[str]] = "ALL",
+    departments: Union[str, List[str]] = "ALL",
+    years: Optional[List[int]] = None,
+    months: Optional[List[int]] = None,
+    shifts: Union[str, List[str]] = "ALL",
+    headcounts: Union[str, List[str]] = "ALL",
+    sort_by: str = "total_allowance",
+    sort_order: str = "default",
 ):
-    """Export shift allowances filtered by month, year, quarter, client, dept, or client partner."""
-    today = date.today()
-    allowed_months = set()
-    year = None
+   
+    periods, meta = _resolve_periods_with_meta(db, years, months)
+    messages: List[str] = []
+    if meta.get("assumed_current_year"):
+        messages.append(f"Months provided without years; assumed current year {date.today().year}.")
+    if meta.get("excluded_future_periods"):
+        messages.append(f"Excluded future period(s): {', '.join(meta['excluded_future_periods'])}.")
+    if meta.get("current_month_attempted") and meta.get("current_month_fallback_used"):
+        cm = meta["current_month_attempted"]
+        fb = meta["current_month_fallback_used"]
+        messages.append(f"No data for current month {cm}; fell back to {fb}.")
 
-    if selected_year:
-        year = validate_year(selected_year)
+    
+    shift_values = _normalize_to_list(shifts)
+    if shift_values:
+        allowed = {s.upper().strip() for s in get_all_shift_keys()}
+        invalid = [s.upper().strip() for s in shift_values if s.upper().strip() not in allowed]
+        if invalid:
+            raise HTTPException(400, f"Invalid shift type(s): {', '.join(invalid)}. Allowed: {', '.join(sorted(allowed))}.")
 
-        if selected_months:
-            for m in selected_months:
-                month_int = validate_month(m)
-                if year == today.year and month_int > today.month:
-                    raise HTTPException(400, f"Future month {month_int:02d} is not allowed")
-                allowed_months.add(month_int)
-
-        if selected_quarters:
-            validate_quarters(selected_quarters)
-            for q in selected_quarters:
-                q_months = get_quarter_months(q.upper())
-
-                if not any(
-                    year < today.year or (year == today.year and m <= today.month)
-                    for m in q_months
-                ):
-                    raise HTTPException(400, f"{q.upper()} has not started yet and cannot be selected")
-
-                for m in q_months:
-                    if year < today.year or (year == today.year and m <= today.month):
-                        allowed_months.add(m)
-
-        if allowed_months:
-            start_month = f"{year}-{min(allowed_months):02d}"
-            end_month = f"{year}-{max(allowed_months):02d}"
-
-    if not start_month or not end_month:
-        latest_month = get_default_start_month(db)
-        start_month = start_month or latest_month
-        end_month = end_month or latest_month
-
-    if not re.fullmatch(r"\d{4}-\d{2}", start_month):
-        raise HTTPException(400, "start_month must be in YYYY-MM format")
-    if not re.fullmatch(r"\d{4}-\d{2}", end_month):
-        raise HTTPException(400, "end_month must be in YYYY-MM format")
-
-    start_dt = datetime.strptime(start_month, "%Y-%m")
-    end_dt = datetime.strptime(end_month, "%Y-%m")
-
-    if end_dt.date() > date(today.year, today.month, 1):
-        raise HTTPException(400, "Future months are not allowed in date range")
-
-    base = db.query(
-        ShiftAllowances.id,
-        ShiftAllowances.emp_id,
-        ShiftAllowances.emp_name,
-        ShiftAllowances.department,
-        ShiftAllowances.client,
-        ShiftAllowances.project,
-        ShiftAllowances.client_partner,
-        func.to_char(ShiftAllowances.duration_month, "YYYY-MM").label("duration_month"),
-        func.to_char(ShiftAllowances.payroll_month, "YYYY-MM").label("payroll_month"),
-    )
-
-    if allowed_months:
-        base = base.filter(
-            extract("year", ShiftAllowances.duration_month) == year,
-            extract("month", ShiftAllowances.duration_month).in_(allowed_months)
+   
+    def _build_base_for_periods(periods_list: List[Tuple[int, int]]):
+        q = db.query(
+            ShiftAllowances.id,
+            ShiftAllowances.emp_id,
+            ShiftAllowances.emp_name,
+            ShiftAllowances.department,
+            ShiftAllowances.client,
+            ShiftAllowances.project,
+            ShiftAllowances.client_partner,
+            func.to_char(ShiftAllowances.duration_month, "YYYY-MM").label("duration_month"),
+            func.to_char(ShiftAllowances.payroll_month, "YYYY-MM").label("payroll_month"),
         )
-    else:
-        base = base.filter(
-            ShiftAllowances.duration_month >= start_dt,
-            ShiftAllowances.duration_month <= end_dt
+        clauses = [and_(
+            extract("year", ShiftAllowances.duration_month) == y,
+            extract("month", ShiftAllowances.duration_month) == m
+        ) for (y, m) in periods_list]
+        return q.filter(or_(*clauses))
+
+    def _apply_filters(q):
+        if emp_id:
+            q = q.filter(func.upper(ShiftAllowances.emp_id).like(f"%{emp_id.upper()}%"))
+        if client_partner:
+            q = q.filter(func.upper(ShiftAllowances.client_partner).like(f"%{client_partner.upper()}%"))
+        q = apply_client_department_filters(q, clients=clients, departments=departments)
+        if shift_values:
+            shift_values_up = [s.upper().strip() for s in shift_values]
+            q = q.filter(
+                exists().where(
+                    and_(
+                        ShiftMapping.shiftallowance_id == ShiftAllowances.id,
+                        func.upper(func.trim(ShiftMapping.shift_type)).in_(shift_values_up),
+                        or_(ShiftMapping.days.is_(None), ShiftMapping.days > 0),
+                    )
+                )
+            )
+        q = q.order_by(
+            extract("year", ShiftAllowances.duration_month).asc(),
+            extract("month", ShiftAllowances.duration_month).asc(),
+            ShiftAllowances.emp_id.asc()
         )
+        return q
 
-    if emp_id:
-        base = base.filter(func.upper(ShiftAllowances.emp_id).like(f"%{emp_id.upper()}%"))
-
-    if client_partner:
-        base = base.filter(
-            func.upper(ShiftAllowances.client_partner).like(f"%{client_partner.upper()}%")
-        )
-
-    base = apply_client_department_filters(base, clients, department)
-
-    base = base.order_by(
-        extract("year", ShiftAllowances.duration_month).asc(),
-        extract("month", ShiftAllowances.duration_month).asc(),
-    )
-
-    all_rows = base.all()
-
-    if selected_quarters:
-        expected_months = {f"{year}-{m:02d}" for m in sorted(allowed_months)}
-        available_months = {r.duration_month for r in all_rows}
-        if available_months != expected_months:
-            raise HTTPException(404, "No data found for the selected quarter period")
-
+    all_rows = _apply_filters(_build_base_for_periods(periods)).all()
     if not all_rows:
-        raise HTTPException(404, "No data found for the selected period")
+        extra = (" " + " ".join(messages)) if messages else ""
+        raise HTTPException(404, f"No data found for selected period/filters.{extra}")
 
-    total_records = len(all_rows)
-    headcount = len({r.emp_id for r in all_rows})
+    rates = { (r.shift_type or "").upper().strip(): float(r.amount or 0) for r in db.query(ShiftsAmount).all() }
 
-    rates = {
-        (r.shift_type or "").upper().strip(): float(r.amount or 0)
-        for r in db.query(ShiftsAmount).all()
-    }
+    unique_employees = _aggregate_unique_employees(db, all_rows, rates)
 
-    overall_shift, overall_total = aggregate_shift_details(db, all_rows, rates)
+    headcount_ranges = _parse_headcount_ranges(headcounts)
+    dept_vals = _normalize_to_list(departments)
+    client_vals = _normalize_to_list(clients)
+    group_key = None
+    if dept_vals or client_vals:
+        group_key = "department" if dept_vals else "client"
 
-    paginated_rows = all_rows[start:start + limit]
-    employees = prepare_employee_data(db, paginated_rows, rates)
+    filtered_employees = _apply_headcount_filter(unique_employees, group_key, headcount_ranges)
+    if not filtered_employees:
+        extra = (" " + " ".join(messages)) if messages else ""
+        raise HTTPException(404, f"No employees match the requested headcount range(s).{extra}")
 
-    _ = get_allowance_columns()
+    filtered_emp_ids = {emp["emp_id"] for emp in filtered_employees}
+    filtered_rows = [r for r in all_rows if r.emp_id in filtered_emp_ids]
+    overall_shift, overall_total = aggregate_shift_details(db, filtered_rows, rates)
 
-    return {
-        "total_records": total_records,
+  
+    overall_shift["headcount"] = len(filtered_employees)
+
+    sort_by_key = (sort_by or "total_allowance").strip().lower()
+    sort_order_in = (sort_order or "default").strip().lower()
+    valid_sort = {"client", "client_partner", "departments", "total_allowance", "headcount"}
+    if sort_by_key not in valid_sort:
+        raise HTTPException(400, f"sort_by must be one of {', '.join(sorted(valid_sort))}")
+    if sort_order_in not in {"default", "asc", "desc"}:
+        raise HTTPException(400, "sort_order must be 'default', 'asc', or 'desc'")
+    if sort_by_key == "headcount":
+        raise HTTPException(400, "sort_by='headcount' is not applicable to employee rows")
+
+    def _default_dir(metric: str) -> str:
+        return "desc" if metric == "total_allowance" else "asc"
+
+
+    direction = sort_order_in if sort_order_in != "default" else _default_dir(sort_by_key)
+    reverse = direction == "desc"
+
+    if sort_by_key == "total_allowance":
+        filtered_employees.sort(key=lambda e: (e.get("total_allowance", 0.0), e.get("emp_id", "")), reverse=reverse)
+    elif sort_by_key in {"client", "client_partner"}:
+        filtered_employees.sort(key=lambda e: (str(e.get(sort_by_key) or "").upper(), e.get("emp_id", "")), reverse=reverse)
+    elif sort_by_key == "departments":
+        filtered_employees.sort(key=lambda e: (str(e.get("department") or "").upper(), e.get("emp_id", "")), reverse=reverse)
+
+    total_unique = len(filtered_employees)
+    employees_page = filtered_employees[start:start + limit]
+
+    _ = get_allowance_columns()  
+
+    response = {
+        "total_records": total_unique,
         "shift_details": {
             **{k: v for k, v in overall_shift.items() if v > 0},
-            "headcount": headcount,
+            "headcount": total_unique,
             "total_allowance": round(overall_total, 2),
         },
-        "data": {"employees": employees},
+        "data": {"employees": employees_page}
     }
+    if messages:
+        response["message"] = " ".join(messages)
+    return response

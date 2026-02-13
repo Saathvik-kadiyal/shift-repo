@@ -1590,7 +1590,6 @@ def validate_years_months(payload: dict, db: Session) -> Tuple[List[Tuple[int, i
     years_raw = payload.get("years")
     months_raw = payload.get("months")
 
-    # Treat ALL / "" / None as not provided
     if _is_all(years_raw) or years_raw in ("", None):
         years_raw = None
     if _is_all(months_raw) or months_raw in ("", None):
@@ -1769,17 +1768,18 @@ def _pick_nearest_baseline(
                 }
                 break
     return baselines
-
 def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
     """
+    Client analytics service with drilldown and headcount/shift breakdowns.
     Sorting:
       sort_by: client|client_partner|departments|headcount|total_allowance
       sort_order: default|asc|desc
       default => no sorting (keep natural order)
-
     Drilldown-only keys for single selected client:
-      - headcount_previous_month: "23% increase"/"23% decrease"/"no change"
-      - total_allowance_previous_month: "23% increase"/"23% decrease"/"no change"
+      - headcount_previous_month
+      - total_allowance_previous_month
+      - shifts_summary: total allowance per shift
+      - departments_summary: total allowance per department
     """
     payload = _payload_to_plain_dict(payload)  
 
@@ -1787,27 +1787,22 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
     depts_filter = parse_departments(payload.get("departments", "ALL"))
     shifts_filter = parse_shifts(payload.get("shifts", "ALL"))
     top_n = parse_top(payload.get("top", "ALL"))
-
     employee_cap = parse_employee_limit(payload.get("headcounts", "ALL"))
-
     sort_by = parse_sort_by(payload.get("sort_by", ""))
     sort_order = parse_sort_order(payload.get("sort_order", "default"))
 
-   
     pairs, period_message = validate_years_months(payload, db=db)
-
     periods = [f"{y:04d}-{m:02d}" for y, m in pairs]
 
-  
     drilldown_client = clients_filter[0] if clients_filter and len(clients_filter) == 1 else None
 
+ 
     base_filters_extra: List[Any] = []
     if clients_filter:
         base_filters_extra.append(func.lower(func.trim(ShiftAllowances.client)).in_([c.lower() for c in clients_filter]))
     if depts_filter:
         base_filters_extra.append(func.lower(func.trim(ShiftAllowances.department)).in_([d.lower() for d in depts_filter]))
 
-   
     yr_month_filters_selected = [
         and_(
             extract("year", ShiftAllowances.duration_month) == y,
@@ -1854,6 +1849,7 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
             "clients": {},
         }
 
+   
     client_nodes: Dict[str, Dict[str, Any]] = {}
     partners: Dict[str, Dict[str, Any]] = {}
     employees_global: Dict[str, Dict[str, Any]] = {}
@@ -1863,20 +1859,20 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
         dept_name = clean_str(dept) or "UNKNOWN"
         partner_name = clean_str(cp) or "UNKNOWN"
         eid = clean_str(emp_id)
-
         st = clean_str(stype).upper()
         if SHIFT_KEY_SET and st not in SHIFT_KEY_SET:
             continue
 
         allowance = float(days or 0) * float(amt or 0)
 
+    
         cnode = client_nodes.setdefault(client_name, {"dept_set": set(), "emp_set": set(), "total_allowance": 0.0})
         cnode["dept_set"].add(dept_name)
         if eid:
             cnode["emp_set"].add(eid)
         cnode["total_allowance"] += allowance
 
-      
+    
         if drilldown_client and client_name.lower() == drilldown_client.lower():
             pnode = partners.setdefault(
                 partner_name,
@@ -1895,42 +1891,38 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
             if st in pnode["shift_totals"]:
                 pnode["shift_totals"][st] += allowance
 
-            if not eid:
-                continue
+            if eid:
+                pe = pnode["employees"].get(eid)
+                if not pe:
+                    pe = {
+                        "emp_id": eid,
+                        "emp_name": clean_str(emp_name),
+                        "department": dept_name,
+                        "client_partner": partner_name,
+                        **{k: 0.0 for k in SHIFT_KEYS},
+                        "total_allowance": 0.0,
+                    }
+                    pnode["employees"][eid] = pe
+                if st in pe:
+                    pe[st] += allowance
+                pe["total_allowance"] += allowance
 
-            pe = pnode["employees"].get(eid)
-            if not pe:
-                pe = {
-                    "emp_id": eid,
-                    "emp_name": clean_str(emp_name),
-                    "department": dept_name,
-                    "client_partner": partner_name,
-                    **{k: 0.0 for k in SHIFT_KEYS},
-                    "total_allowance": 0.0,
-                }
-                pnode["employees"][eid] = pe
+                # Global employee tracker
+                eg = employees_global.get(eid)
+                if not eg:
+                    eg = {
+                        "emp_id": eid,
+                        "emp_name": clean_str(emp_name),
+                        "department": dept_name,
+                        "client_partner": partner_name,
+                        **{k: 0.0 for k in SHIFT_KEYS},
+                        "total_allowance": 0.0,
+                    }
+                    employees_global[eid] = eg
+                if st in eg:
+                    eg[st] += allowance
+                eg["total_allowance"] += allowance
 
-            if st in pe:
-                pe[st] += allowance
-            pe["total_allowance"] += allowance
-
-            eg = employees_global.get(eid)
-            if not eg:
-                eg = {
-                    "emp_id": eid,
-                    "emp_name": clean_str(emp_name),
-                    "department": dept_name,
-                    "client_partner": partner_name,
-                    **{k: 0.0 for k in SHIFT_KEYS},
-                    "total_allowance": 0.0,
-                }
-                employees_global[eid] = eg
-
-            if st in eg:
-                eg[st] += allowance
-            eg["total_allowance"] += allowance
-
-  
     clients_out: Dict[str, Any] = {}
     for cname, node in client_nodes.items():
         clients_out[cname] = {
@@ -1939,12 +1931,10 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
             "total_allowance": round(float(node["total_allowance"] or 0.0), 2),
         }
 
-
     if sort_order != "default" and sort_by:
         clients_out = apply_sort_dict(clients_out, sort_by=("client" if sort_by == "client" else sort_by), sort_order=sort_order)
     clients_out = top_n_dict(clients_out, top_n)
 
-   
     overall_depts: Set[str] = set()
     overall_emps: Set[str] = set()
     total_allowance_sum = 0.0
@@ -1967,19 +1957,35 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
         "clients": clients_out,
     }
 
-   
     if drilldown_client:
         selected_key = next((k for k in client_nodes.keys() if k.lower() == drilldown_client.lower()), drilldown_client)
+        node = client_nodes[selected_key]
 
-    
-        if selected_key not in result["clients"] and selected_key in client_nodes:
-            node = client_nodes[selected_key]
-            result["clients"][selected_key] = {
-                "departments": len(node["dept_set"]),
-                "headcount": len(node["emp_set"]),
-                "total_allowance": round(float(node["total_allowance"] or 0.0), 2),
-            }
+      
+        client_obj: Dict[str, Any] = {
+            "departments": len(node["dept_set"]),
+            "headcount": len(node["emp_set"]),
+            "total_allowance": round(float(node["total_allowance"] or 0.0), 2),
+        }
 
+        shifts_summary: Dict[str, float] = {k: 0.0 for k in SHIFT_KEYS}
+        for emp_id, emp_data in employees_global.items():
+            if emp_id not in node["emp_set"]:
+                continue
+            for shift_key in SHIFT_KEYS:
+                shifts_summary[shift_key] += emp_data.get(shift_key, 0.0)
+        client_obj["shifts_summary"] = {k: round(v, 2) for k, v in shifts_summary.items()}
+
+        departments_summary: Dict[str, float] = {}
+        for emp_id, emp_data in employees_global.items():
+            if emp_id not in node["emp_set"]:
+                continue
+            dept = emp_data.get("department") or "UNKNOWN"
+            departments_summary.setdefault(dept, 0.0)
+            departments_summary[dept] += emp_data.get("total_allowance", 0.0)
+        client_obj["departments_summary"] = {k: round(v, 2) for k, v in departments_summary.items()}
+
+      
         trend_y, trend_m = max(pairs)
         candidates = month_back_list(trend_y, trend_m, n=12)
 
@@ -2002,10 +2008,8 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
         prev_hc = int(b["headcount"])
         prev_allow = float(b["allow"])
 
-        result["clients"][selected_key].update({
-            "headcount_previous_month": fmt_change(curr_hc, prev_hc),
-            "total_allowance_previous_month": fmt_change(curr_allow, prev_allow),
-        })
+        client_obj["headcount_previous_month"] = fmt_change(curr_hc, prev_hc)
+        client_obj["total_allowance_previous_month"] = fmt_change(curr_allow, prev_allow)
 
       
         employees_global_list = sorted(employees_global.values(), key=lambda e: e.get("total_allowance", 0.0), reverse=True)
@@ -2013,7 +2017,6 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
             employees_global_list = employees_global_list[:employee_cap]
         top_emp_ids = {e["emp_id"] for e in employees_global_list}
 
-       
         client_partners_detailed: Dict[str, Any] = {}
         for pname, pnode in partners.items():
             emps = [e for eid, e in pnode["employees"].items() if eid in top_emp_ids]
@@ -2033,10 +2036,12 @@ def client_analytics_service(db: Session, payload: dict) -> Dict[str, Any]:
             elif sort_by in ("departments", "headcount", "total_allowance"):
                 client_partners_detailed = apply_sort_dict(client_partners_detailed, sort_by, sort_order)
 
-        result["clients"][selected_key] = {
-            **result["clients"][selected_key],
+        client_obj.update({
             "client_partner_count": len(partners),
             "client_partners": client_partners_detailed,
-        }
+        })
+
+    
+        result["clients"][selected_key] = client_obj
 
     return result

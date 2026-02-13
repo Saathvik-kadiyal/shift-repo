@@ -1,7 +1,8 @@
 """Services for client comparison, totals, and department summaries."""
-
+from __future__ import annotations
 from datetime import datetime, date,timedelta
 from calendar import monthrange
+
 from typing import Optional, Dict, Any, Union,List,Tuple,Set
 from decimal import Decimal,InvalidOperation
 from fastapi import HTTPException
@@ -12,6 +13,11 @@ from models.models import ShiftAllowances, ShiftMapping, ShiftsAmount
 from utils.shift_config import get_all_shift_keys
 from schemas.dashboardschema import ClientTotalAllowanceFilter
 from collections import OrderedDict
+
+import re
+from collections import defaultdict
+from sqlalchemy import func, and_, or_, cast, Integer, extract
+
 
 def parse_yyyy_mm(value: str) -> date:
     try:
@@ -292,6 +298,7 @@ def client_comparison_service(
 
     return final_result
 
+
 def _safe_int(v, default=None) -> Optional[int]:
     if v is None:
         return default
@@ -320,10 +327,14 @@ def _normalize_months(months: List[int]) -> List[int]:
             result.append(mi)
     return result
 
-
-
 def _parse_headcount_filter(filter_value):
-
+    """
+    Accepts: None, "ALL", [0] -> None
+             "n" (e.g., "5") -> eq rule
+             "a-b" (e.g., "1-10") -> range rule
+             list of the above -> multiple rules (OR)
+    Returns: list of ("range", a, b) | ("eq", n) or None
+    """
     if filter_value in (None, "ALL", [0]):
         return None
 
@@ -379,21 +390,42 @@ def _headcount_matches(value: Optional[int], rules) -> bool:
                 return True
     return False
 
+def _normalize_shifts_filter(shifts: Union[str, List[str], None]) -> Optional[Set[str]]:
+    """
+    Returns a set of uppercase shift keys or None if "ALL"/None.
+    """
+    if shifts is None or (isinstance(shifts, str) and shifts.strip().upper() == "ALL"):
+        return None
+    if isinstance(shifts, str):
+        return {shifts.strip().upper()}
+    # list
+    cleaned = {str(s).strip().upper() for s in shifts if str(s).strip()}
+    return cleaned or None
 
 def get_client_total_allowances(db: Session, filters):
+    """
+    Returns per-client summary including:
+      - total_allowance (float),
+      - headcount (unique employees with at least one counted shift),
+      - shifts (dict of shift-key -> allowance),
+      - departments: list of { department, headcount, total_allowance, shifts }
+    plus selected periods and user-facing messages.
+
+    Headcount filter rules (filters.headcounts) are applied per-client after aggregation.
+    Shift filtering (filters.shifts) limits which shift types contribute to amounts & headcount.
+    """
 
     today = date.today()
     current_year = today.year
     current_month = today.month
     messages: List[str] = []
 
-    
+   
     raw_years = filters.years or []
     raw_months = filters.months or []
 
     if raw_years == [0]:
         raw_years = []
-
     if raw_months == [0]:
         raw_months = []
 
@@ -422,9 +454,9 @@ def get_client_total_allowances(db: Session, filters):
                 ShiftAllowances.department == filters.departments
             )
 
+   
     if not years and not months:
-
-  
+      
         current_exists = base_query.filter(
             func.extract("year", ShiftAllowances.duration_month) == current_year,
             func.extract("month", ShiftAllowances.duration_month) == current_month
@@ -434,7 +466,7 @@ def get_client_total_allowances(db: Session, filters):
             years = [current_year]
             months = [current_month]
         else:
-           
+            
             cutoff = today.replace(day=1) - relativedelta(months=12)
 
             latest = (
@@ -448,82 +480,154 @@ def get_client_total_allowances(db: Session, filters):
                 latest_date = latest.duration_month
                 years = [latest_date.year]
                 months = [latest_date.month]
-
                 messages.append(
-                    f"No data for current month. "
-                    f"Showing latest available month: "
+                    f"No data for current month. Showing latest available month: "
                     f"{latest_date.month}-{latest_date.year}"
                 )
             else:
-             
+               
                 years = [current_year]
                 months = [current_month]
 
-   
     elif months and not years:
+       
         years = [current_year]
 
     elif years and not months:
+
         months = list(range(1, 13))
 
-
-
+    
     q = base_query.filter(
         func.extract("year", ShiftAllowances.duration_month).in_(years)
     ).filter(
         func.extract("month", ShiftAllowances.duration_month).in_(months)
     )
 
+    if getattr(filters, "emp_id", None):
+        emp_list = filters.emp_id if isinstance(filters.emp_id, list) else [filters.emp_id]
+        q = q.filter(or_(*[func.upper(ShiftAllowances.emp_id) == str(e).upper() for e in emp_list]))
+
+  
+    if getattr(filters, "client_partner", None):
+        cp_list = filters.client_partner if isinstance(filters.client_partner, list) else [filters.client_partner]
+        q = q.filter(
+            or_(*[func.upper(ShiftAllowances.client_partner).like(f"%{str(cp).upper()}%") for cp in cp_list])
+        )
+
     rows = q.all()
-
-
 
     rate_rows = db.query(ShiftsAmount).all()
     rates = {
-        str(r.shift_type).upper(): Decimal(r.amount)
+        str(r.shift_type).upper(): Decimal(r.amount or 0)
         for r in rate_rows
     }
 
-    summary: Dict[str, Decimal] = {}
-    employees_by_client: Dict[str, Set[str]] = {}
-
    
+    allowed_shifts: Optional[Set[str]] = _normalize_shifts_filter(getattr(filters, "shifts", None))
+
+    # -----------------------------
+    # Aggregate per-client (with dept/shift, and headcount)
+    # -----------------------------
+    # Structures:
+    #   client_totals[client]: Decimal allowance
+    #   client_emps[client]: set of emp_id (count only if they had >=1 counted shift)
+    #   client_shifts[client][shift_key]: Decimal allowance
+    #   client_depts[client][department] = {
+    #       "total": Decimal,
+    #       "shifts": dict(shift_key->Decimal),
+    #       "emp_ids": set()
+    #   }
+    client_totals: Dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    client_emps: Dict[str, set] = defaultdict(set)
+    client_shifts: Dict[str, Dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal(0)))
+    client_depts: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(lambda: defaultdict(lambda: {
+        "total": Decimal(0),
+        "shifts": defaultdict(lambda: Decimal(0)),
+        "emp_ids": set()
+    }))
+
     for row in rows:
-
         client = row.client or "Unknown"
+        dept = row.department or "Unknown"
+        emp = str(row.emp_id) if row.emp_id else None
 
-        summary.setdefault(client, Decimal(0))
-        employees_by_client.setdefault(client, set())
+        row_contributed = False
 
-        if row.emp_id:
-            employees_by_client[client].add(str(row.emp_id))
-
-        for mapping in getattr(row, "shift_mappings", []):
-
-            shift_key = str(mapping.shift_type).upper()
+        mappings = getattr(row, "shift_mappings", []) or []
+        for mapping in mappings:
+            shift_key = str(mapping.shift_type or "").upper()
             days = Decimal(mapping.days or 0)
+            if days <= 0:
+                continue
+
+         
+            if allowed_shifts is not None and shift_key not in allowed_shifts:
+                continue
+
             rate = rates.get(shift_key, Decimal(0))
+            amount = days * rate
+            if amount <= 0:
+                continue
 
-            summary[client] += days * rate
+            client_totals[client] += amount
+            client_shifts[client][shift_key] += amount
 
-    
+      
+            client_depts[client][dept]["total"] += amount
+            client_depts[client][dept]["shifts"][shift_key] += amount
 
-    result = []
+            row_contributed = True
 
-    for client, total in summary.items():
+        
+        if row_contributed and emp:
+            client_emps[client].add(emp)
+            client_depts[client][dept]["emp_ids"].add(emp)
+
+    headcount_rules = _parse_headcount_filter(getattr(filters, "headcounts", None))
+
+    result: List[Dict[str, Any]] = []
+    for client, total in client_totals.items():
+        headcount = len(client_emps.get(client, set()))
+        if not _headcount_matches(headcount, headcount_rules):
+            continue
+
+        shifts_out = {
+            k: float(v) for k, v in client_shifts.get(client, {}).items() if v > 0
+        }
+
+        depts_out = []
+        for dept, drec in client_depts[client].items():
+            d_head = len(drec["emp_ids"])
+            d_total = float(drec["total"])
+            d_shifts = {sk: float(av) for sk, av in drec["shifts"].items() if av > 0}
+          
+            if d_total > 0:
+                depts_out.append({
+                    "department": dept,
+                    "headcount": d_head,
+                    "total_allowance": d_total,
+                    "shifts": d_shifts
+                })
+
         result.append({
             "client": client,
-            "total_allowance": float(total)
+            "headcount": headcount,
+            "total_allowance": float(total),
+            "shifts": shifts_out,
+            "departments": depts_out
         })
 
+   
     result.sort(key=lambda x: x["total_allowance"], reverse=True)
 
-    if filters.top and str(filters.top).isdigit():
+    if getattr(filters, "top", None) and str(filters.top).isdigit():
         result = result[:int(filters.top)]
 
     if not result and not messages:
         messages.append("No data found for selected periods.")
 
+ 
     return {
         "selected_periods": [
             {"year": y, "months": months} for y in years
@@ -531,8 +635,6 @@ def get_client_total_allowances(db: Session, filters):
         "messages": messages,
         "data": result
     }
-
-
 def get_client_departments_service(db: Session, client: str | None):
 
     if client is not None:
