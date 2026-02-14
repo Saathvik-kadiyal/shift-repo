@@ -115,18 +115,20 @@ class DashboardFilterRequest(BaseModel):
 class ClientAnalyticsRequest(BaseModel):
     clients: Union[Literal["ALL"], str, List[str]] = "ALL"
     departments: Union[Literal["ALL"], str, List[str]] = "ALL"
-    years: List[int] = Field(default_factory=lambda: [0])
-    months: List[int] = Field(default_factory=lambda: [0])
+
+    years: Optional[List[int]] = None
+    months: Optional[List[int]] = None
+
     headcounts: Union[Literal["ALL"], str, List[str]] = "ALL"
     shifts: Union[Literal["ALL"], str, List[str]] = "ALL"
     top: Union[Literal["ALL"], str, int] = "ALL"
 
-    #  only two fields for sorting
     sort_by: Optional[SortBy] = "total_allowance"
-    sort_order: SortOrder = "default"   # default means keep DB order
+    sort_order: SortOrder = "default"
 
     class Config:
         extra = "forbid"
+
 
 
 class ClientTotalAllowanceFilter(BaseModel):
