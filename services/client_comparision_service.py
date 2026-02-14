@@ -403,24 +403,11 @@ def _normalize_shifts_filter(shifts: Union[str, List[str], None]) -> Optional[Se
     return cleaned or None
 
 def get_client_total_allowances(db: Session, filters):
-    """
-    Returns per-client summary including:
-      - total_allowance (float),
-      - headcount (unique employees with at least one counted shift),
-      - shifts (dict of shift-key -> allowance),
-      - departments: list of { department, headcount, total_allowance, shifts }
-    plus selected periods and user-facing messages.
-
-    Headcount filter rules (filters.headcounts) are applied per-client after aggregation.
-    Shift filtering (filters.shifts) limits which shift types contribute to amounts & headcount.
-    """
-
     today = date.today()
     current_year = today.year
     current_month = today.month
     messages: List[str] = []
 
-   
     raw_years = filters.years or []
     raw_months = filters.months or []
 
@@ -436,27 +423,20 @@ def get_client_total_allowances(db: Session, filters):
 
     if filters.clients != "ALL":
         if isinstance(filters.clients, list):
-            base_query = base_query.filter(
-                ShiftAllowances.client.in_(filters.clients)
-            )
+            base_query = base_query.filter(ShiftAllowances.client.in_(filters.clients))
         else:
-            base_query = base_query.filter(
-                ShiftAllowances.client == filters.clients
-            )
+            base_query = base_query.filter(ShiftAllowances.client == filters.clients)
 
     if filters.departments != "ALL":
         if isinstance(filters.departments, list):
-            base_query = base_query.filter(
-                ShiftAllowances.department.in_(filters.departments)
-            )
+            base_query = base_query.filter(ShiftAllowances.department.in_(filters.departments))
         else:
-            base_query = base_query.filter(
-                ShiftAllowances.department == filters.departments
-            )
+            base_query = base_query.filter(ShiftAllowances.department == filters.departments)
 
-   
+    # -----------------------------
+    # Determine years/months
+    # -----------------------------
     if not years and not months:
-      
         current_exists = base_query.filter(
             func.extract("year", ShiftAllowances.duration_month) == current_year,
             func.extract("month", ShiftAllowances.duration_month) == current_month
@@ -466,16 +446,13 @@ def get_client_total_allowances(db: Session, filters):
             years = [current_year]
             months = [current_month]
         else:
-            
             cutoff = today.replace(day=1) - relativedelta(months=12)
-
             latest = (
                 base_query
                 .filter(ShiftAllowances.duration_month >= cutoff)
                 .order_by(ShiftAllowances.duration_month.desc())
                 .first()
             )
-
             if latest and latest.duration_month:
                 latest_date = latest.duration_month
                 years = [latest_date.year]
@@ -485,19 +462,13 @@ def get_client_total_allowances(db: Session, filters):
                     f"{latest_date.month}-{latest_date.year}"
                 )
             else:
-               
                 years = [current_year]
                 months = [current_month]
-
     elif months and not years:
-       
         years = [current_year]
-
     elif years and not months:
-
         months = list(range(1, 13))
 
-    
     q = base_query.filter(
         func.extract("year", ShiftAllowances.duration_month).in_(years)
     ).filter(
@@ -508,7 +479,6 @@ def get_client_total_allowances(db: Session, filters):
         emp_list = filters.emp_id if isinstance(filters.emp_id, list) else [filters.emp_id]
         q = q.filter(or_(*[func.upper(ShiftAllowances.emp_id) == str(e).upper() for e in emp_list]))
 
-  
     if getattr(filters, "client_partner", None):
         cp_list = filters.client_partner if isinstance(filters.client_partner, list) else [filters.client_partner]
         q = q.filter(
@@ -518,26 +488,11 @@ def get_client_total_allowances(db: Session, filters):
     rows = q.all()
 
     rate_rows = db.query(ShiftsAmount).all()
-    rates = {
-        str(r.shift_type).upper(): Decimal(r.amount or 0)
-        for r in rate_rows
-    }
+    rates = {str(r.shift_type).upper(): Decimal(r.amount or 0) for r in rate_rows}
 
-   
     allowed_shifts: Optional[Set[str]] = _normalize_shifts_filter(getattr(filters, "shifts", None))
 
-    # -----------------------------
-    # Aggregate per-client (with dept/shift, and headcount)
-    # -----------------------------
-    # Structures:
-    #   client_totals[client]: Decimal allowance
-    #   client_emps[client]: set of emp_id (count only if they had >=1 counted shift)
-    #   client_shifts[client][shift_key]: Decimal allowance
-    #   client_depts[client][department] = {
-    #       "total": Decimal,
-    #       "shifts": dict(shift_key->Decimal),
-    #       "emp_ids": set()
-    #   }
+   
     client_totals: Dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     client_emps: Dict[str, set] = defaultdict(set)
     client_shifts: Dict[str, Dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal(0)))
@@ -553,18 +508,15 @@ def get_client_total_allowances(db: Session, filters):
         emp = str(row.emp_id) if row.emp_id else None
 
         row_contributed = False
-
         mappings = getattr(row, "shift_mappings", []) or []
+
         for mapping in mappings:
             shift_key = str(mapping.shift_type or "").upper()
             days = Decimal(mapping.days or 0)
             if days <= 0:
                 continue
-
-         
-            if allowed_shifts is not None and shift_key not in allowed_shifts:
+            if allowed_shifts and shift_key not in allowed_shifts:
                 continue
-
             rate = rates.get(shift_key, Decimal(0))
             amount = days * rate
             if amount <= 0:
@@ -572,36 +524,31 @@ def get_client_total_allowances(db: Session, filters):
 
             client_totals[client] += amount
             client_shifts[client][shift_key] += amount
-
-      
             client_depts[client][dept]["total"] += amount
             client_depts[client][dept]["shifts"][shift_key] += amount
 
             row_contributed = True
 
-        
         if row_contributed and emp:
             client_emps[client].add(emp)
             client_depts[client][dept]["emp_ids"].add(emp)
 
+   
     headcount_rules = _parse_headcount_filter(getattr(filters, "headcounts", None))
-
     result: List[Dict[str, Any]] = []
+
     for client, total in client_totals.items():
         headcount = len(client_emps.get(client, set()))
         if not _headcount_matches(headcount, headcount_rules):
             continue
 
-        shifts_out = {
-            k: float(v) for k, v in client_shifts.get(client, {}).items() if v > 0
-        }
-
+        shifts_out = {k: float(v) for k, v in client_shifts.get(client, {}).items() if v > 0}
         depts_out = []
+
         for dept, drec in client_depts[client].items():
             d_head = len(drec["emp_ids"])
             d_total = float(drec["total"])
             d_shifts = {sk: float(av) for sk, av in drec["shifts"].items() if av > 0}
-          
             if d_total > 0:
                 depts_out.append({
                     "department": dept,
@@ -618,23 +565,36 @@ def get_client_total_allowances(db: Session, filters):
             "departments": depts_out
         })
 
-   
     result.sort(key=lambda x: x["total_allowance"], reverse=True)
 
-    if getattr(filters, "top", None) and str(filters.top).isdigit():
-        result = result[:int(filters.top)]
+
+    top_value = getattr(filters, "top", None)
+    if top_value is not None:
+        if str(top_value).lower() == "all":
+            pass  
+        else:
+            if not str(top_value).isdigit():
+                raise HTTPException(
+                    status_code=400,
+                    detail="top must be a positive integer or ALL"
+                )
+            top_int = int(top_value)
+            if top_int <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="top must be greater than 0"
+                )
+            result = result[:top_int]
 
     if not result and not messages:
         messages.append("No data found for selected periods.")
 
- 
     return {
-        "selected_periods": [
-            {"year": y, "months": months} for y in years
-        ],
+        "selected_periods": [{"year": y, "months": months} for y in years],
         "messages": messages,
         "data": result
     }
+
 def get_client_departments_service(db: Session):
 
     rows = (

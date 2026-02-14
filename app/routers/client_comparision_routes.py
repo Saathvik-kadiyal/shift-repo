@@ -34,11 +34,15 @@ def client_comparison(
     )
 @router.post("/client-total-allowances-piechart")
 def client_total_allowances(
-    filters: ClientTotalAllowanceFilter,
+    filters: ClientTotalAllowanceFilter,   
+    top: Optional[str] = Query(None, description="Top N clients or 'ALL'"),
     db: Session = Depends(get_db),
     _current_user = Depends(get_current_user)
 ):
-    """Return total allowances grouped by client with filters."""
+    # Inject top into filters
+    if top is not None:
+        filters.top = top
+
     return get_client_total_allowances(db, filters)
 
 @router.get("/client-departments")
