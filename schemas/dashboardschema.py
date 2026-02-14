@@ -130,7 +130,6 @@ class ClientAnalyticsRequest(BaseModel):
         extra = "forbid"
 
 
-
 class ClientTotalAllowanceFilter(BaseModel):
     clients: Union[str, List[str]] = "ALL"
     departments: Union[str, List[str]] = "ALL"
@@ -140,8 +139,10 @@ class ClientTotalAllowanceFilter(BaseModel):
     shifts: Union[str, List[str]] = "ALL"
     top: str = "ALL"
 
-    sort_by: Literal["total_allowance", "client"] = "total_allowance"
+    # Sorting options: add all supported keys
+    sort_by: Literal["total_allowance", "client", "client_partner", "headcount", "departments"] = "total_allowance"
     sort_order: Literal["asc", "desc", "default"] = "default"
+
 
 class SelectedPeriod(BaseModel):
     year: int

@@ -433,9 +433,6 @@ def get_client_total_allowances(db: Session, filters):
         else:
             base_query = base_query.filter(ShiftAllowances.department == filters.departments)
 
-    # -----------------------------
-    # Determine years/months
-    # -----------------------------
     if not years and not months:
         current_exists = base_query.filter(
             func.extract("year", ShiftAllowances.duration_month) == current_year,
@@ -492,7 +489,6 @@ def get_client_total_allowances(db: Session, filters):
 
     allowed_shifts: Optional[Set[str]] = _normalize_shifts_filter(getattr(filters, "shifts", None))
 
-   
     client_totals: Dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     client_emps: Dict[str, set] = defaultdict(set)
     client_shifts: Dict[str, Dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal(0)))
@@ -565,26 +561,42 @@ def get_client_total_allowances(db: Session, filters):
             "departments": depts_out
         })
 
-    result.sort(key=lambda x: x["total_allowance"], reverse=True)
+    sort_by_key = getattr(filters, "sort_by", "total_allowance")
+    sort_order_in = getattr(filters, "sort_order", "desc").lower()
+    reverse = sort_order_in == "desc"
 
+    valid_sort_keys = {"client", "client_partner", "headcount", "departments", "total_allowance"}
+    if sort_by_key not in valid_sort_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sort_by must be one of {', '.join(sorted(valid_sort_keys))}"
+        )
 
+    if sort_by_key == "departments":
+       
+        result.sort(
+            key=lambda x: sum(d["total_allowance"] for d in x.get("departments", [])),
+            reverse=reverse
+        )
+    else:
+       
+        result.sort(
+            key=lambda x: (x.get(sort_by_key) if sort_by_key != "client_partner" else str(x.get(sort_by_key) or "").upper()),
+            reverse=reverse
+        )
+
+ 
     top_value = getattr(filters, "top", None)
     if top_value is not None:
         if str(top_value).lower() == "all":
-            pass  
+            pass
         else:
-            if not str(top_value).isdigit():
+            if not str(top_value).isdigit() or int(top_value) <= 0:
                 raise HTTPException(
                     status_code=400,
                     detail="top must be a positive integer or ALL"
                 )
-            top_int = int(top_value)
-            if top_int <= 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail="top must be greater than 0"
-                )
-            result = result[:top_int]
+            result = result[:int(top_value)]
 
     if not result and not messages:
         messages.append("No data found for selected periods.")
