@@ -624,7 +624,8 @@ try:
 except Exception:
     def get_all_shift_keys() -> List[str]:
         return []
-
+ 
+ 
 def _safe_int(v, default=None) -> Optional[int]:
     if v is None:
         return default
@@ -632,42 +633,42 @@ def _safe_int(v, default=None) -> Optional[int]:
         return int(Decimal(str(v)))
     except (InvalidOperation, ValueError, TypeError):
         return default
-
-
+ 
+ 
 def _normalize_months(months: List[int]) -> List[int]:
     out = []
     for m in months or []:
         mi = _safe_int(m, None)
         if mi is not None and 1 <= mi <= 12:
             out.append(mi)
-
+ 
     seen, res = set(), []
     for m in out:
         if m not in seen:
             seen.add(m)
             res.append(m)
     return res
-
-
+ 
+ 
 def _normalize_years(years: List[int]) -> List[int]:
     out = []
     for y in years or []:
         yi = _safe_int(y, None)
         if yi is not None:
             out.append(yi)
-
+ 
     seen, res = set(), []
     for y in out:
         if y not in seen:
             seen.add(y)
             res.append(y)
     return res
-
-
+ 
+ 
 def _year_month_tuple(d) -> Tuple[int, int]:
     return (d.year, d.month)
-
-
+ 
+ 
 def _discover_available_pairs(db: Session, base_query) -> List[Tuple[int, int]]:
     """
     Optional helper if you want to inspect what (year, month) pairs exist.
@@ -679,15 +680,16 @@ def _discover_available_pairs(db: Session, base_query) -> List[Tuple[int, int]]:
         {_year_month_tuple(r[0]) for r in rows if r[0] is not None},
         key=lambda t: (t[0], t[1])
     )
-
-
+ 
+ 
 def _group_selected_periods_from_map(months_by_year: Dict[int, List[int]]) -> List[Dict[str, Any]]:
     """Builds a summary structure for the response."""
     return [
         {"year": y, "months": sorted(set(ms))}
         for y, ms in sorted(months_by_year.items())
     ]
-
+ 
+ 
 def _parse_headcount_filter(filter_value: Union[str, List[str]]):
     """
     Parses headcount filters into normalized rules:
@@ -699,13 +701,13 @@ def _parse_headcount_filter(filter_value: Union[str, List[str]]):
     """
     if filter_value in (None, "ALL", [0]):
         return None
-
+ 
     rules = []
     values = filter_value if isinstance(filter_value, list) else [filter_value]
-
+ 
     for item in values:
         s = str(item).strip()
-
+ 
         if s.endswith("+") and s[:-1].isdigit():
             rules.append(("range", int(s[:-1]), 10**9))
         elif "-" in s:
@@ -716,16 +718,16 @@ def _parse_headcount_filter(filter_value: Union[str, List[str]]):
                     rules.append(("range", start, end))
         elif s.isdigit():
             rules.append(("eq", int(s)))
-
+ 
     return rules or None
-
-
+ 
+ 
 def _headcount_matches(value: Optional[int], rules) -> bool:
     if rules is None:
         return True
     if value is None:
         return False
-
+ 
     for rule in rules:
         if rule[0] == "range":
             _, start, end = rule
@@ -736,8 +738,8 @@ def _headcount_matches(value: Optional[int], rules) -> bool:
             if value == expected:
                 return True
     return False
-
-
+ 
+ 
 def _resolve_periods_and_messages(db: Session, base_query, filters, today: date):
     """
     Resolution rules:
@@ -749,39 +751,41 @@ def _resolve_periods_and_messages(db: Session, base_query, filters, today: date)
       - If only months specified: assume current year
       - If only years specified: use all 1..12 months
       - Exclude future (Y, M) pairs
-
+ 
     Returns:
       final_years: List[int]
       months_by_year: Dict[int, List[int]]
       messages: List[str]
     """
+    from dateutil.relativedelta import relativedelta
+ 
     messages: List[str] = []
     current_year, current_month = today.year, today.month
-
+ 
     raw_years = filters.years or []
     raw_months = filters.months or []
-
+ 
     if raw_years == [0]:
         raw_years = []
     if raw_months == [0]:
         raw_months = []
-
+ 
     years = _normalize_years(raw_years)
     months = _normalize_months(raw_months)
-
+ 
     def pair_exists(y: int, m: int) -> bool:
         return base_query.filter(
             func.extract("year", ShiftAllowances.duration_month) == y,
             func.extract("month", ShiftAllowances.duration_month) == m
         ).first() is not None
-
+ 
     if not years and not months:
-     
+        # 1) current month?
         if pair_exists(current_year, current_month):
             years = [current_year]
             months = [current_month]
         else:
-            
+            # 2) latest in last 12 months
             cutoff = today.replace(day=1) - relativedelta(months=12)
             latest_row_12 = (
                 base_query
@@ -799,7 +803,7 @@ def _resolve_periods_and_messages(db: Session, base_query, filters, today: date)
                     f"{latest_date.month}-{latest_date.year}"
                 )
             else:
-                
+                # 3) latest in whole DB
                 latest_row_any = (
                     base_query
                     .order_by(ShiftAllowances.duration_month.desc())
@@ -815,80 +819,90 @@ def _resolve_periods_and_messages(db: Session, base_query, filters, today: date)
                         f"{latest_date.month}-{latest_date.year}"
                     )
                 else:
-                  
+                    # 4) default current
                     years = [current_year]
                     months = [current_month]
                     messages.append("No data in the database. Defaulting to current month.")
-
+ 
     elif months and not years:
-      
         years = [current_year]
-
+ 
     elif years and not months:
-       
         months = list(range(1, 12 + 1))
-
-
+ 
+    # Build (y, m) pairs, excluding future
     pairs: List[Tuple[int, int]] = []
     for y in years:
         for m in months:
             if (y > current_year) or (y == current_year and m > current_month):
                 continue
             pairs.append((y, m))
-
-   
+ 
+    # If everything filtered out as future, keep the raw pairs (unlikely, but safe)
     if not pairs:
         pairs = [(y, m) for y in years for m in months]
-
-   
+ 
     pairs = sorted(set(pairs), key=lambda t: (t[0], t[1]))
-
+ 
     months_by_year: Dict[int, List[int]] = {}
     for y, m in pairs:
         months_by_year.setdefault(y, []).append(m)
-
+ 
     final_years = sorted(months_by_year.keys())
-
+ 
     return final_years, months_by_year, messages
-
-
+ 
+ 
 def _extract_employee_id(row: ShiftAllowances) -> Optional[str]:
     emp = getattr(row, "emp_id", None)
     if emp:
         return str(emp).strip()
-
+ 
     name = str(getattr(row, "emp_name", "") or "").strip()
     dept = str(getattr(row, "department", "") or "").strip()
     client = str(getattr(row, "client", "") or "").strip()
-
+ 
     if name or dept or client:
         return f"{name}|{dept}|{client}"
-
+ 
     return None
-
-
+ 
+ 
 def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
     """
     Builds a client dashboard with departments count, headcount, client partner, and total allowance,
     following the corrected period resolution logic and filters.
     Supports sorting and top N limits.
+ 
+    Response structure:
+    {
+      "summary": {"selected_periods": [{"year": 2025, "months": [12]}]},
+      "messages": [...],
+      "dashboard": OrderedDict({
+        "<Client>": {
+          "client_partner": <str|None>,
+          "departments": <int>,
+          "headcount": <int>,
+          "total_allowance": <float>
+        }, ...
+      })
+    }
     """
     today = date.today()
-
+ 
+    # --- Payload validations ---
     if filters.years and filters.years != [0]:
         for y in filters.years:
             yi = _safe_int(y)
             if yi is None or yi < 2000 or yi > today.year + 5:
                 raise HTTPException(400, f"Invalid year: {y}")
-
-
+ 
     if filters.months and filters.months != [0]:
         for m in filters.months:
             mi = _safe_int(m)
             if mi is None or mi < 1 or mi > 12:
                 raise HTTPException(400, f"Invalid month: {m}")
-
-   
+ 
     VALID_SHIFTS = set(get_all_shift_keys())
     if filters.shifts != "ALL":
         shifts_to_check = (
@@ -898,8 +912,8 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
             shift_key = str(s).upper().strip()
             if VALID_SHIFTS and shift_key not in VALID_SHIFTS:
                 raise HTTPException(400, f"Invalid shift type: {s}")
-
-    
+ 
+    # headcount format validation
     if filters.headcounts not in (None, "ALL", [0]):
         values = filters.headcounts if isinstance(filters.headcounts, list) else [filters.headcounts]
         for item in values:
@@ -926,9 +940,9 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
                     status_code=400,
                     detail=f"Invalid headcount format: {item}. Use 5 or 1-10."
                 )
-
-   
-    if filters.top is None or str(filters.top).lower() == "all":
+ 
+    # top N
+    if getattr(filters, "top", None) is None or str(filters.top).lower() == "all":
         top_int = None
     else:
         if not str(filters.top).isdigit():
@@ -936,13 +950,15 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
         top_int = int(filters.top)
         if top_int <= 0:
             raise HTTPException(400, "top must be > 0")
-
-  
+ 
+    # --- Build rate map for shifts ---
     rate_rows = db.query(ShiftsAmount).all()
     rates = {str(r.shift_type).upper(): Decimal(r.amount) for r in rate_rows}
-
-   
+ 
+    # --- Base query ---
     q = db.query(ShiftAllowances)
+ 
+    # Client filter
     if getattr(filters, "client_starts_with", None):
         prefix = filters.client_starts_with.strip().lower()
         q = q.filter(func.lower(func.trim(ShiftAllowances.client)).like(f"{prefix}%"))
@@ -953,9 +969,23 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
         else:
             norm = filters.clients.strip().lower()
             q = q.filter(func.lower(func.trim(ShiftAllowances.client)) == norm)
-
-    # --- RESOLVE PERIODS ---
+ 
+    # --- Department filter (FIX APPLIED HERE) ---
+    # Case-insensitive, handles both string and list, and is applied BEFORE period resolution.
+    if getattr(filters, "departments", "ALL") != "ALL":
+        if isinstance(filters.departments, list):
+            norm_depts = [str(d).strip().lower() for d in filters.departments if str(d).strip()]
+            if norm_depts:
+                q = q.filter(func.lower(func.trim(ShiftAllowances.department)).in_(norm_depts))
+        else:
+            norm_dept = str(filters.departments).strip().lower()
+            if norm_dept:
+                q = q.filter(func.lower(func.trim(ShiftAllowances.department)) == norm_dept)
+ 
+    # --- Resolve periods with the ALREADY FILTERED query ---
     years, months_by_year, messages = _resolve_periods_and_messages(db, q, filters, today)
+ 
+    # Apply the (year, month) clauses
     pair_clauses = []
     for y, ms in months_by_year.items():
         pair_clauses.append(and_(
@@ -964,56 +994,67 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
         ))
     if pair_clauses:
         q = q.filter(or_(*pair_clauses))
-
+ 
+    # --- Load rows after all filters applied ---
     rows = q.all()
+ 
+    # --- Headcount rules and shift selection ---
     hc_rules = _parse_headcount_filter(filters.headcounts)
-
-  
+ 
     selected_shifts: Optional[Set[str]] = None
     if filters.shifts != "ALL":
         if isinstance(filters.shifts, list):
             selected_shifts = {str(s).upper() for s in filters.shifts}
         else:
             selected_shifts = {str(filters.shifts).upper()}
-
  
+    # --- Aggregate to client level ---
     employees_by_client: Dict[str, Set[str]] = {}
     departments_by_client: Dict[str, Set[str]] = {}
     allowances_by_client: Dict[str, Decimal] = {}
-
+ 
+    # To access shift mappings, ensure your ORM relationships are configured;
+    # here we assume "row.shift_mappings" yields mapping entries.
+    VALID_SHIFTS = set(get_all_shift_keys())
+ 
     for row in rows:
         client = row.client or "Unknown"
         emp = _extract_employee_id(row)
-
+ 
         employees_by_client.setdefault(client, set())
         departments_by_client.setdefault(client, set())
         allowances_by_client.setdefault(client, Decimal(0))
-
+ 
         if emp:
             employees_by_client[client].add(emp)
         if getattr(row, "department", None):
             departments_by_client[client].add(row.department)
-
+ 
         for mapping in getattr(row, "shift_mappings", []):
             shift_key = str(mapping.shift_type).upper()
             if selected_shifts and shift_key not in selected_shifts:
                 continue
             if VALID_SHIFTS and shift_key not in VALID_SHIFTS:
                 continue
-
+ 
             days = Decimal(mapping.days or 0)
             rate = rates.get(shift_key, Decimal(0))
             allowances_by_client[client] += days * rate
-
+ 
+    # --- Build items with headcount filter applied at CLIENT level ---
     items = []
     for client, total in allowances_by_client.items():
         hc = len(employees_by_client.get(client, []))
         if not _headcount_matches(hc, hc_rules):
             continue
-
-        client_partner_set = {row.client_partner for row in rows if row.client == client and getattr(row, "client_partner", None)}
+ 
+        client_partner_set = {
+            row.client_partner
+            for row in rows
+            if row.client == client and getattr(row, "client_partner", None)
+        }
         client_partner = next(iter(client_partner_set), None) if client_partner_set else None
-
+ 
         items.append({
             "client": client,
             "client_partner": client_partner,
@@ -1021,22 +1062,25 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
             "headcount": hc,
             "total_allowance": float(total),
         })
-
-    
+ 
+    # --- Sorting and top ---
     sort_by = getattr(filters, "sort_by", "total_allowance")
     sort_order = getattr(filters, "sort_order", "desc").lower()
     valid_sort_keys = {"client", "client_partner", "headcount", "total_allowance", "departments"}
-
+ 
     if sort_by not in valid_sort_keys:
         raise HTTPException(400, f"Invalid sort_by value: {sort_by}. Must be one of {valid_sort_keys}")
-
+ 
+    if sort_order not in ("asc", "desc"):
+        sort_order = "desc"  # default fallback behavior
     reverse = sort_order == "desc"
+ 
     items.sort(key=lambda x: x.get(sort_by) or "", reverse=reverse)
-
+ 
     if top_int:
         items = items[:top_int]
-
-   
+ 
+    # --- Ordered dashboard ---
     dashboard = OrderedDict()
     for it in items:
         dashboard[it["client"]] = {
@@ -1045,14 +1089,15 @@ def get_client_dashboard(db: Session, filters) -> Dict[str, Any]:
             "headcount": it["headcount"],
             "total_allowance": it["total_allowance"],
         }
-
+ 
     if not dashboard and not messages:
         messages.append("No data found for selected filters.")
-
+ 
     selected_periods = _group_selected_periods_from_map(months_by_year)
-
+ 
     return {
         "summary": {"selected_periods": selected_periods},
         "messages": messages,
         "dashboard": dashboard
     }
+ 
