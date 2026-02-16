@@ -15,11 +15,14 @@ Base.metadata.create_all(bind=engine)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=".*",  # ✅ Allows all origins
-    allow_credentials=True,   # ✅ Works with credentials
+    allow_origins=[
+        "https://demo-repo-eight-delta.vercel.app",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 app.include_router(route.router)
 
