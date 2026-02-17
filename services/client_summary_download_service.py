@@ -1,3 +1,4 @@
+# services/client_summary_download_service.py
 """
 Service for exporting client summary data as an Excel download (fast)
 WITH file-path caching (simple, default-latest only).
@@ -539,5 +540,5 @@ def client_summary_download_service(db: Session, payload: dict) -> str:
         df, currency_cols, path, notes_lines=notes_lines
     )
     cache.set(cache_key, {"file_path": written_path}, expire=CACHE_TTL)
-    return written_path
+    return written_path 
  
