@@ -1,7 +1,7 @@
 """
 Service for exporting client summary data as an Excel download (fast)
 WITH file-path caching (simple, default-latest only).
-
+ 
 - Uses Pandas + XlsxWriter for speed on large datasets.
 - Excel headers use config display strings (with '\n') and are wrapped in Excel.
 - Avoids stale headers by caching a 'shift signature' (keys + labels).
@@ -9,66 +9,48 @@ WITH file-path caching (simple, default-latest only).
     * For default latest-month request -> stable file name cached by filter-aware month key + signature.
     * For non-default requests -> payload-hash based file name, separately cached.
 """
-
+ 
 from __future__ import annotations
-
+ 
 import os
 import tempfile
 import json
 import hashlib
-from typing import Dict, List, Any, Tuple, Optional, Set
-
+from typing import Dict, List, Any, Tuple, Optional, Set, Union
+ 
 import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from diskcache import Cache
-
+ 
 from utils.shift_config import get_all_shift_keys, get_shift_string
 from services.client_summary_service import (
     client_summary_service,
     is_default_latest_month_request,
-    latest_month_cache_key,   
+    latest_month_cache_key,
     CACHE_TTL,
 )
 from models.models import ShiftAllowances
-
-
+ 
 cache = Cache("./diskcache/latest_month")
-
 EXPORT_DIR = "exports"
 DEFAULT_EXPORT_FILE = "client_summary_latest.xlsx"
-
-
+ 
+ 
 def _shift_header(key: str) -> str:
     """Excel header label for shift key using config (may include '\n')."""
     return get_shift_string(key) or key
-
-
-
-def normalize_all_list(value):
-    if value is None:
-        return None
-    if isinstance(value, list):
-        if len(value) == 1 and str(value[0]).strip().upper() == "ALL":
-            return "ALL"
-        return value
-    if isinstance(value, str):
-        if value.strip().upper() == "ALL":
-            return "ALL"
-        return [value]
-    return value
-
-
-
+ 
+ 
 def _money(v: Any) -> float:
     """Coerce to float for numeric excel formatting."""
     try:
         return float(v or 0)
     except Exception:
         return 0.0
-
-
+ 
+ 
 def _get_db_latest_ym(db: Session) -> Optional[str]:
     """
     Return latest month available in DB as 'YYYY-MM', or None if table is empty.
@@ -76,8 +58,8 @@ def _get_db_latest_ym(db: Session) -> Optional[str]:
     """
     latest_dt = db.query(func.max(ShiftAllowances.duration_month)).scalar()
     return latest_dt.strftime("%Y-%m") if latest_dt else None
-
-
+ 
+ 
 def _current_shift_signature() -> Tuple[str, ...]:
     """
     Build a signature that changes if shift keys/labels change.
@@ -87,42 +69,31 @@ def _current_shift_signature() -> Tuple[str, ...]:
     labels = [get_shift_string(k) or k for k in keys]
     # Signature includes both keys and labels to detect renames/reorders
     return tuple(keys + labels)
-
-
+ 
+ 
 def _normalize_multi_str_or_list(value: Any) -> Optional[Set[str]]:
     """
     Normalize payload values that can be 'ALL', string, or list -> set[str].
     Returns None when no filter should be applied ('ALL', None, []).
-
-    DEBUG-ENABLED: prints the input and resulting filter.
     """
     if value is None:
-        print("DEBUG: Filter value is None -> no filter applied")
         return None
-
+ 
     if isinstance(value, str):
         if value.strip().upper() == "ALL":
-            print("DEBUG: Filter value is 'ALL' -> no filter applied")
             return None
         parts = [p.strip() for p in value.split(",") if p.strip()]
-        result = set(parts) if parts else None
-        print(f"DEBUG: Normalized string filter: {result}")
-        return result
-
+        return set(parts) if parts else None
+ 
     if isinstance(value, list):
         parts = [str(p).strip() for p in value if str(p).strip()]
         if len(parts) == 1 and parts[0].upper() == "ALL":
-            print("DEBUG: List filter contains only 'ALL' -> no filter applied")
             return None
-        result = set(parts) if parts else None
-        print(f"DEBUG: Normalized list filter: {result}")
-        return result
-
-    # Fallback
-    print(f"DEBUG: Unknown filter type {type(value)} -> no filter applied")
+        return set(parts) if parts else None
+ 
     return None
-
-
+ 
+ 
 def _write_excel_to_path(
     df: pd.DataFrame,
     currency_cols: List[str],
@@ -134,15 +105,16 @@ def _write_excel_to_path(
     Adds a 'Notes' worksheet when notes_lines are provided.
     """
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-
+ 
     with pd.ExcelWriter(file_path, engine="xlsxwriter") as writer:
         workbook = writer.book
-
+ 
         # If DF has rows, write main sheet
         if df is not None and not df.empty:
-            df.to_excel(writer, index=False, sheet_name="Client Summary")
-            ws = writer.sheets["Client Summary"]
-
+            sheet_name = "Client Summary"
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+            ws = writer.sheets[sheet_name]
+ 
             header_fmt = workbook.add_format({
                 "text_wrap": True,
                 "align": "center",
@@ -151,29 +123,29 @@ def _write_excel_to_path(
                 "border": 1,
                 "bg_color": "#EDEDED",
             })
-
+ 
             center_fmt = workbook.add_format({
                 "align": "center",
                 "valign": "vcenter",
                 "border": 1,
             })
-
+ 
             inr_fmt = workbook.add_format({
                 "align": "center",
                 "valign": "vcenter",
                 "border": 1,
                 "num_format": "₹ #,##0",
             })
-
+ 
             # Write header explicitly to apply header format
             for c, col_name in enumerate(df.columns):
                 ws.write(0, c, col_name, header_fmt)
-
+ 
             ws.set_row(0, 60)
             ws.freeze_panes(1, 0)
-
+ 
             currency_set = set(currency_cols)
-
+ 
             # Autosize columns with basic heuristics
             for c, col_name in enumerate(df.columns):
                 lines = str(col_name).split("\n")
@@ -183,7 +155,7 @@ def _write_excel_to_path(
                     width = max(width, 18)
                 fmt = inr_fmt if col_name in currency_set else center_fmt
                 ws.set_column(c, c, width, fmt)
-
+ 
         # Add Notes sheet if requested
         if notes_lines:
             ws_notes = workbook.add_worksheet("Notes")
@@ -195,8 +167,8 @@ def _write_excel_to_path(
             ws_notes.set_column(0, 0, 120)
             for idx, line in enumerate(notes_lines):
                 ws_notes.write(idx, 0, line, text_fmt)
-
-
+ 
+ 
 def _atomic_write_excel(
     df: pd.DataFrame,
     currency_cols: List[str],
@@ -223,7 +195,8 @@ def _atomic_write_excel(
                 os.remove(temp_path)
             except Exception:
                 pass
-
+ 
+ 
 def _build_dataframe_from_summary(
     summary_data: Dict[str, Any],
     emp_ids_filter: Optional[Set[str]],
@@ -231,33 +204,30 @@ def _build_dataframe_from_summary(
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
     Build the export DataFrame and return (df, shift_cols).
-    DEBUG version: prints why rows are skipped.
     """
     shift_keys = [k.upper().strip() for k in get_all_shift_keys()]
     shift_cols = [get_shift_string(k) or k for k in shift_keys]
-
+ 
     rows: List[Dict[str, Any]] = []
-
+ 
     for period_key in sorted(summary_data):
         period_data = summary_data[period_key]
         clients = period_data.get("clients")
         if not clients:
-            print(f"DEBUG: No clients found for period {period_key}")
             continue
-
+ 
         for client_name, client_block in clients.items():
             partner_value = client_block.get("client_partner", "")
             departments = client_block.get("departments", {})
-
+ 
             for dept_name, dept_block in departments.items():
                 employees = dept_block.get("employees", [])
-
+ 
                 # Dept-only row when no employees
                 if not employees:
                     if partner_filter and partner_value not in partner_filter:
-                        print(f"DEBUG: Dept '{dept_name}' skipped due to partner filter")
                         continue
-
+ 
                     row = {
                         "Period": period_key,
                         "Client": client_name,
@@ -271,19 +241,17 @@ def _build_dataframe_from_summary(
                     row["Total Allowance"] = _money(dept_block.get("dept_total", 0))
                     rows.append(row)
                     continue
-
+ 
                 # Employee-level rows
                 for emp in employees:
                     emp_id_val = emp.get("emp_id", "")
                     if emp_ids_filter and emp_id_val not in emp_ids_filter:
-                        print(f"DEBUG: Employee '{emp_id_val}' skipped due to emp_id filter")
                         continue
-
+ 
                     emp_partner = emp.get("client_partner", partner_value)
                     if partner_filter and emp_partner not in partner_filter:
-                        print(f"DEBUG: Employee '{emp_id_val}' skipped due to partner filter")
                         continue
-
+ 
                     row = {
                         "Period": period_key,
                         "Client": client_name,
@@ -296,32 +264,30 @@ def _build_dataframe_from_summary(
                         row[col] = _money(emp.get(k, dept_block.get(k, 0)))
                     row["Total Allowance"] = _money(emp.get("total", dept_block.get("dept_total", 0)))
                     rows.append(row)
-
+ 
     df = pd.DataFrame(rows)
-
+ 
     if not df.empty:
         df["Period"] = pd.to_datetime(df["Period"], format="%Y-%m", errors="coerce")
         df = df.sort_values(by=["Period", "Client", "Department", "Employee ID"])
         df["Period"] = df["Period"].dt.strftime("%Y-%m")
-
+ 
     ordered_cols = (
         ["Period", "Client", "Client Partner", "Employee ID", "Department", "Head Count"]
     ) + shift_cols + ["Total Allowance"]
-
+ 
     if not df.empty:
         df = df[[c for c in ordered_cols if c in df.columns]]
-
-    print(f"DEBUG: Built DataFrame with {len(df)} rows")
+ 
     return df, shift_cols
-
-
-
+ 
+ 
 def _payload_hash(payload: dict) -> str:
     """Stable hash for non-default payloads."""
     j = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(j.encode("utf-8")).hexdigest()
-
-
+ 
+ 
 def _stable_cache_key(payload: dict, default_req: bool, shift_sig: Optional[Tuple[str, ...]]) -> str:
     """
     For default requests, use a fixed key so the file name stays stable,
@@ -331,8 +297,8 @@ def _stable_cache_key(payload: dict, default_req: bool, shift_sig: Optional[Tupl
         # Use filter-aware key so different clients/departments/shifts don't collide
         return f"{latest_month_cache_key(payload)}:excel"
     return f"client_summary:{_payload_hash(payload)}.xlsx"
-
-
+ 
+ 
 def _requested_periods_from_payload(payload: dict) -> List[str]:
     """
     Build the list of requested period strings ('YYYY-MM') from the payload:
@@ -345,7 +311,7 @@ def _requested_periods_from_payload(payload: dict) -> List[str]:
     years = payload.get("years") or []
     months = payload.get("months") or []
     periods: List[str] = []
-
+ 
     if years and months:
         for y in years:
             for m in months:
@@ -358,48 +324,109 @@ def _requested_periods_from_payload(payload: dict) -> List[str]:
         current_year = pd.Timestamp.today().year
         for m in months:
             periods.append(f"{int(current_year):04d}-{int(m):02d}")
-
+ 
     return periods
-
+ 
+ 
+ 
+def _parse_headcount_range_str(value: Optional[Union[str, int]]) -> Optional[Tuple[int, int]]:
+    """
+    Accepts:
+      - None / "ALL" -> None
+      - "N" -> (N, N)
+      - "N-M" -> (N, M)
+    Validates positive integers and min <= max. Supports unicode dashes.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s.upper() == "ALL":
+        return None
+ 
+    # normalize unicode dashes
+    s = s.replace("–", "-").replace("—", "-").replace("−", "-")
+ 
+    if "-" in s:
+        lo_str, hi_str = [x.strip() for x in s.split("-", 1)]
+        if not lo_str.isdigit() or not hi_str.isdigit():
+            raise HTTPException(status_code=400, detail=f"Invalid headcount range: '{value}'")
+        lo, hi = int(lo_str), int(hi_str)
+        if lo <= 0 or hi <= 0 or lo > hi:
+            raise HTTPException(status_code=400, detail=f"Invalid headcount range: '{value}'")
+        return (lo, hi)
+ 
+    # single number
+    if not s.isdigit():
+        raise HTTPException(status_code=400, detail=f"Invalid headcount value: '{value}'")
+    n = int(s)
+    if n <= 0:
+        raise HTTPException(status_code=400, detail=f"Invalid headcount value: '{value}'")
+    return (n, n)
+ 
+ 
+def _apply_headcount_filter(df: pd.DataFrame, headcount_range: Optional[Tuple[int, int]]) -> pd.DataFrame:
+    """
+    Filters rows by department headcount within the given range.
+    Headcount is computed per (Period, Client, Client Partner, Department) as the sum of 'Head Count'.
+    Works for both department-only rows and employee rows.
+    """
+    if headcount_range is None or df.empty:
+        return df
+ 
+    lo, hi = headcount_range
+    keys = ["Period", "Client", "Client Partner", "Department"]
+ 
+    # Ensure required columns exist gracefully
+    missing_keys = [k for k in keys if k not in df.columns]
+    if missing_keys:
+        # If structure isn't as expected, skip filtering instead of crashing
+        return df
+ 
+    # compute dept headcount
+    grp = df.groupby(keys, as_index=False)["Head Count"].sum().rename(columns={"Head Count": "_DeptHeadCount"})
+    df2 = df.merge(grp, on=keys, how="left")
+    mask = (df2["_DeptHeadCount"] >= lo) & (df2["_DeptHeadCount"] <= hi)
+    df2 = df2[mask].drop(columns=["_DeptHeadCount"])
+    return df2
+ 
+ 
+ 
 def client_summary_download_service(db: Session, payload: dict) -> str:
     """
     Generate and export client summary Excel with a simplified caching strategy.
-
+ 
     Enhancements:
-    - SORTING ONLY for months/years (ascending).
+    - Sorting ONLY for months/years (ascending).
     - If some requested periods have no data, we add a 'Notes' sheet listing them.
     - If no data at all for requested selection, we write a Notes-only Excel instead of raising.
+    - NEW: Headcount range filter (string "N" or "N-M") applied at DataFrame level.
     """
-
     payload = payload or {}
-
+ 
+    # Determine if this is the default request (for caching name/policy)
     default_req = is_default_latest_month_request(payload)
-
-
+ 
+    # Normalize month/year ordering
     if isinstance(payload.get("months"), list) and payload["months"]:
         payload["months"] = sorted({int(m) for m in payload["months"]})
-
     if isinstance(payload.get("years"), list) and payload["years"]:
         payload["years"] = sorted({int(y) for y in payload["years"]})
-
-
+ 
     requested_periods = _requested_periods_from_payload(payload)
-
-    
+ 
+    # Build cache anchors (latest month + shift signature) for default requests
     latest_ym = _get_db_latest_ym(db) if default_req else None
     shift_sig = _current_shift_signature() if default_req else None
-
+ 
     cache_key = _stable_cache_key(payload, default_req, shift_sig)
     final_default_path = os.path.join(EXPORT_DIR, DEFAULT_EXPORT_FILE)
     cached = cache.get(cache_key)
-
+ 
     if cached:
         cached_path = cached.get("file_path")
-
         if default_req:
             cached_month = cached.get("_cached_month")
             cached_signature = cached.get("shift_sig")
-
             if (
                 cached_path
                 and os.path.exists(cached_path)
@@ -413,29 +440,22 @@ def client_summary_download_service(db: Session, payload: dict) -> str:
         else:
             if cached_path and os.path.exists(cached_path):
                 return cached_path
-
-   
+ 
+ 
     notes_lines: List[str] = []
-
     try:
         summary_data = client_summary_service(db, payload)
     except HTTPException as e:
         if e.status_code == 404 and (payload.get("months") or payload.get("years")):
             notes_lines.append("No data present for the selected month(s)/year(s).")
-
             empty_df = pd.DataFrame()
-
             if default_req:
                 written_path = _atomic_write_excel(
                     empty_df, [], final_default_path, notes_lines=notes_lines
                 )
                 cache.set(
                     cache_key,
-                    {
-                        "_cached_month": latest_ym,
-                        "file_path": written_path,
-                        "shift_sig": shift_sig,
-                    },
+                    {"_cached_month": latest_ym, "file_path": written_path, "shift_sig": shift_sig},
                     expire=CACHE_TTL,
                 )
                 return written_path
@@ -443,60 +463,49 @@ def client_summary_download_service(db: Session, payload: dict) -> str:
                 hashed_name = cache_key.split(":", 1)[-1]
                 if not hashed_name.endswith(".xlsx"):
                     hashed_name += ".xlsx"
-
                 path = os.path.join(EXPORT_DIR, hashed_name)
                 written_path = _atomic_write_excel(
                     empty_df, [], path, notes_lines=notes_lines
                 )
-                cache.set(
-                    cache_key,
-                    {"file_path": written_path},
-                    expire=CACHE_TTL,
-                )
+                cache.set(cache_key, {"file_path": written_path}, expire=CACHE_TTL)
                 return written_path
-
         raise
-
-   
+ 
+    # Optional filters (emp_id / client_partner) at export level
     emp_ids_filter = _normalize_multi_str_or_list(payload.get("emp_id"))
     partner_filter = _normalize_multi_str_or_list(payload.get("client_partner"))
-
-    
+ 
+    # Build DF
     df, shift_cols = _build_dataframe_from_summary(
         summary_data,
         emp_ids_filter,
         partner_filter,
     )
-
     currency_cols = shift_cols + ["Total Allowance"]
-
  
+    headcount_range = _parse_headcount_range_str(payload.get("headcounts"))
+    df = _apply_headcount_filter(df, headcount_range)
+ 
+   
     if requested_periods:
         present_periods = set(summary_data.keys())
         missing_periods = [p for p in requested_periods if p not in present_periods]
-
         if missing_periods:
             pretty_missing = ", ".join(missing_periods)
             notes_lines.append(
                 f"No data present for the following selected period(s): {pretty_missing}"
             )
-
-   
+ 
     if df is None or df.empty:
         if not notes_lines:
             notes_lines.append("No data present.")
-
         if default_req:
             written_path = _atomic_write_excel(
                 pd.DataFrame(), [], final_default_path, notes_lines=notes_lines
             )
             cache.set(
                 cache_key,
-                {
-                    "_cached_month": latest_ym,
-                    "file_path": written_path,
-                    "shift_sig": shift_sig,
-                },
+                {"_cached_month": latest_ym, "file_path": written_path, "shift_sig": shift_sig},
                 expire=CACHE_TTL,
             )
             return written_path
@@ -504,52 +513,31 @@ def client_summary_download_service(db: Session, payload: dict) -> str:
             hashed_name = cache_key.split(":", 1)[-1]
             if not hashed_name.endswith(".xlsx"):
                 hashed_name += ".xlsx"
-
             path = os.path.join(EXPORT_DIR, hashed_name)
-
             written_path = _atomic_write_excel(
                 pd.DataFrame(), [], path, notes_lines=notes_lines
             )
-
-            cache.set(
-                cache_key,
-                {"file_path": written_path},
-                expire=CACHE_TTL,
-            )
-
+            cache.set(cache_key, {"file_path": written_path}, expire=CACHE_TTL)
             return written_path
-
+ 
     if default_req:
         written_path = _atomic_write_excel(
             df, currency_cols, final_default_path, notes_lines=notes_lines
         )
-
         cache.set(
             cache_key,
-            {
-                "_cached_month": latest_ym,
-                "file_path": written_path,
-                "shift_sig": shift_sig,
-            },
+            {"_cached_month": latest_ym, "file_path": written_path, "shift_sig": shift_sig},
             expire=CACHE_TTL,
         )
-
         return written_path
-
+ 
     hashed_name = cache_key.split(":", 1)[-1]
     if not hashed_name.endswith(".xlsx"):
         hashed_name += ".xlsx"
-
     path = os.path.join(EXPORT_DIR, hashed_name)
-
     written_path = _atomic_write_excel(
         df, currency_cols, path, notes_lines=notes_lines
     )
-
-    cache.set(
-        cache_key,
-        {"file_path": written_path},
-        expire=CACHE_TTL,
-    )
-
+    cache.set(cache_key, {"file_path": written_path}, expire=CACHE_TTL)
     return written_path
+ 
