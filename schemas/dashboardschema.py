@@ -9,6 +9,7 @@ response structures for analytics endpoints.
 
 from typing import List,Optional, Literal,Union,Dict,Any
 from pydantic import BaseModel,Field,field_validator,ConfigDict
+import re
 
 
 class PieChartClientShift(BaseModel):
