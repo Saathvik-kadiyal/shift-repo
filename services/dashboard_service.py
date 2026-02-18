@@ -1017,9 +1017,7 @@ def get_previous_month_unique_employees(db: Session, base_filters, year: int, mo
         .scalar()
     )
     return int(count_ or 0)
- 
- def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
- 
+def get_client_dashboard_summary(db: Session, payload: Any) -> Dict[str, Any]:
     if ShiftAllowances is None or ShiftMapping is None or ShiftsAmount is None:
         return {
             "summary": {"selected_periods": []},
